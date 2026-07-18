@@ -1,5 +1,5 @@
 # H-Mobility-Autonomous-Advanced-Course-Simulation
-H-Mobility Class 자율주행 심화과정 Simulation
+H-모빌리티 클래스 자율주행 심화과정 시뮬레이션
 
 ## 초기 환경설정
 ```
