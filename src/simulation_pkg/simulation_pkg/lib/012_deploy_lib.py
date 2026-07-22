@@ -88,20 +88,20 @@ def load_model(entity_name, model_name, random_coordinates):
     os.system(f"ros2 run gazebo_ros spawn_entity.py -file {model_file} -entity {entity_name} -x {x} -y {y} -z {z} -R {roll} -P {pitch} -Y {yaw}")
 
 def driving_ego():  
-    x_min = 2 #-2.568994
-    x_max = 2 #-2.526850
-    
-    y_min = 22.73
-    y_max = 22.73
-    
+    x_min = -5.092991 # 2
+    x_max = -5.092991 # 2
+
+    y_min = -22.694952 # 22.73
+    y_max = -22.694952 # 22.73
+
     random_x = random.uniform(x_min, x_max)
     random_y = random.uniform(y_min, y_max)
-    
+
     z = 0.011641
 
     r = -0.0
     p = 0.0
-    y = -1.563693 # 1.585076
+    y = 1.559726 # -1.563693
 
     return random_x, random_y, z, r, p, y
 
@@ -139,27 +139,54 @@ def traffic_light_stand(): # 신호등
 
     return random_x, random_y, z, r, p, y
 
+def hmobility_traffic_light_stand(): # 신호등 (H-모빌리티 환경 - 고정 위치)
+    x = 4.863314
+
+    y_pos = -17.906038
+
+    z = 0.0
+
+    r = 0.0
+    p = 0.0
+    y = -1.565107
+
+    return x, y_pos, z, r, p, y
+
+def hmobility_obstacle_car(): # 장애물 차량 (H-모빌리티 환경 - 최종평가 유사, 고정 위치)
+    x = 2.884013
+    y_pos = 19.826846
+    z = 0.011641
+
+    r = 0.0
+    p = 0.0
+    y = -1.571629
+
+    return x, y_pos, z, r, p, y
+
 # 장애물 회피 차량 + 범위 지정 + 랜덤
 model_types = ["prius_hybrid_ob1", "prius_hybrid_ob2", "prius_hybrid_ob3", "hatchback_green", "hatchback_yellow"] 
 
-obstacle_coordinates1 = (12.251981, -15.909271, 0.00, 0.00, 0.00, 2.484252)
+obstacle_coordinates1 = (12.718713, -15.719065, 0.00, 0.00, 0.00, 2.424641)
 obstacle_coordinates_1= (-3.659642, 8.710748, 0.00, 0.00, 0.00, -0.013934)
 obstacle_coordinates_2= (-3.659642, 2.037476, 0.00, 0.00, 0.00, -0.013934)
 
-obstacle_coordinates2 = [(11.884767, 11.605120), (12.040719, 10.060495), (12.230394, 8.181866)]
-obstacle_coordinates3 = [(16.106836, -0.111269), (16.281788, -1.844067), (16.366463, -3.446680)]
+# 회피 장애물 후보 (x, y, yaw). 실차 배치를 그대로 측정한 값.
+# obstacle2 (트랙 x≈12) / obstacle3 (트랙 x≈16), 각각 3후보 -> 조합 9가지
+obstacle_coordinates2 = [(12.389278, 8.702062, -3.049152),
+                         (12.236391, 10.351026, -3.049136),
+                         (12.084256, 11.991503, -3.049116)]
+obstacle_coordinates3 = [(16.984153, -3.086174, -3.041943),
+                         (16.852462, -1.429280, -3.041441),
+                         (16.682904, 0.257396, -3.041395)]
 
-def obstacle_coord(coordinates):  
-    x_obstacle, y_obstacle = random.choice(coordinates)
-    
+def obstacle_coord(coordinates):
+    x_obstacle, y_obstacle, yaw = random.choice(coordinates)
+
     z = 0.0
     r = 0.0
     p = 0.0
 
-    y = 3.25
-
-
-    return x_obstacle, y_obstacle, z, r, p, y
+    return x_obstacle, y_obstacle, z, r, p, yaw
 
 parking_start = [(-1.672862, -16.311572, 0.011641, -0.000000, 0.00, -3.133789),
                  (-1.681217, -15.244810, 0.011641, -0.000000, 0.00, -3.133795),  
@@ -170,13 +197,14 @@ parking_start = [(-1.672862, -16.311572, 0.011641, -0.000000, 0.00, -3.133789),
 parking_ego = random.choice(parking_start)
 
 
-# 주차 칸의 범위를 정의 (x_min, x_max, y_min, y_max, z_min, z_max, yaw_min, yaw_max)
+# 수직주차 4칸 (실차 배치를 그대로 측정한 값). 나란히 배열: x 거의 일정, y 만 다름.
+# range 는 min=max 로 두어 정확히 그 자리에 놓이게 한다.
 parking_zones = {
-    1: {"x_range": (2.633951, 3.147836), "y_range": (1.190888, 1.854545), "yaw_range": (-3.132635, -3.128233)},
-    2: {"x_range": (2.543644, 3.121653 ), "y_range": (-1.986755, -1.258803), "yaw_range": (-3.132635, -3.128233)},
-    3: {"x_range": (2.722283, 3.126416), "y_range": (-5.262367, -4.567991), "yaw_range": (-3.132635, -3.128233)},
-    4: {"x_range": (2.583159, 3.261442), "y_range": (-8.441107, -7.685804), "yaw_range": (-3.132635, -3.128233)}
-}   
+    1: {"x_range": (-4.619265, -4.619265), "y_range": (8.749825, 8.749825), "yaw_range": (-0.013934, -0.013934)},
+    2: {"x_range": (-4.610268, -4.610268), "y_range": (5.387341, 5.387341), "yaw_range": (-0.013934, -0.013934)},
+    3: {"x_range": (-4.601163, -4.601163), "y_range": (1.984500, 1.984500), "yaw_range": (-0.013934, -0.013934)},
+    4: {"x_range": (-4.592220, -4.592220), "y_range": (-1.357908, -1.357908), "yaw_range": (-0.013934, -0.013934)}
+}
 
 def parking_coord(zone):  
     x_obstacle = random.uniform(zone["x_range"][0], zone["x_range"][1])

@@ -34,6 +34,8 @@ setup(
         'load_ego_car_node = simulation_pkg.lib.load_ego_car_node:main',
         'load_obstable_car_node = simulation_pkg.lib.load_obstable_car_node:main',
         'load_traffic_light_node = simulation_pkg.lib.load_traffic_light_node:main',
+        'traffic_light_gui_node = simulation_pkg.traffic_light_gui_node:main',
+        'load_hmobility_obstacle_node = simulation_pkg.lib.load_hmobility_obstacle_node:main',
         'load_parking_car_node = simulation_pkg.lib.load_parking_car_node:main',
         
         # 실제 환경과 동일한 구성의 노드

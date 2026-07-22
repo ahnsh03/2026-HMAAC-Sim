@@ -9,7 +9,7 @@ material track
       specular 0.2 0.2 0.2 1.0 12.5
       texture_unit
       {
-        texture hmobility_track.png
+        texture basic_track_2026.jpg
         
         filtering anistropic
         max_anisotropy 16

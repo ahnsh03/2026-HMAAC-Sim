@@ -4,7 +4,15 @@
   <gui fullscreen='0'>
     <plugin name='keyboard' filename='libKeyboardGUIPlugin.so'/>
       <camera name='user_camera'>
-        <pose>20 22 15 0 0.5 3.14</pose> <!-- 초기 시점 -->
+        <!-- 초기 시점: 트랙 전체 top-down (driving_sim / mission_sim)
+             pitch 1.5708 = 정확히 수직.
+             orthographic 을 쓰면 가장자리 원근이 완전히 사라지지만, Gazebo 는
+             ortho 배율을 지정하는 방법이 없어서(pose 의 z 가 배율에 영향을 주지
+             않음) 매번 휠로 맞춰야 한다. 그래서 perspective 를 쓴다.
+             z 를 키울수록 가장자리 기울기가 줄고 트랙은 작아진다.
+               z=120 -> 트랙이 화면을 꽉 채움, 가장자리 12.6도
+               z=200 -> 트랙이 화면 55%, 가장자리 7.7도 (더 평평해 보임) -->
+        <pose>0 -5 120 0 1.5708 0</pose>
         <view_controller>orbit</view_controller>
         <projection_type>perspective</projection_type>
       </camera>
@@ -200,5 +208,9 @@
       <uri>model://sun</uri>
     </include>
     
-  </world>
+  
+    <!-- 신호등 색상 런타임 제어용 (/set_light_properties 서비스 제공) -->
+    <plugin name="gazebo_ros_properties" filename="libgazebo_ros_properties.so"/>
+    <plugin name="gazebo_ros_state" filename="libgazebo_ros_state.so"><ros><namespace>/gazebo</namespace></ros><update_rate>60.0</update_rate></plugin>
+</world>
 </sdf>

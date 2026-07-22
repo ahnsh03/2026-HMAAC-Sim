@@ -1,0 +1,12 @@
+# colcon 빌드 산출물
+build/
+install/
+log/
+
+# 파이썬 캐시
+__pycache__/
+*.py[cod]
+
+# 단, lib/pyc 안의 것은 코스에서 제공하는 라이브러리라 반드시 추적해야 한다
+!src/*/*/lib/pyc/
+!src/*/*/lib/pyc/*.pyc

@@ -1,0 +1,94 @@
+<?xml version='1.0'?>
+<sdf version='1.7'>
+
+  <model name="traffic">
+    <static>true</static>
+
+    <!-- 신호등 본체 -->
+    <link name="traffic_light_body">
+      <visual name="traffic_light_visual">
+        <geometry>
+          <mesh>
+            <uri>model://traffic/meshes/traffic.dae</uri>
+            <scale>0.0029 0.0029 0.0029</scale>
+          </mesh>
+        </geometry>
+        <!-- 메시에 박힌 회색 재질을 덮어써서 본체를 검게 만든다 -->
+        <material>
+          <ambient>0.05 0.05 0.05 1</ambient>
+          <diffuse>0.08 0.08 0.08 1</diffuse>
+          <specular>0.1 0.1 0.1 1</specular>
+          <emissive>0 0 0 1</emissive>
+        </material>
+      </visual>
+    </link>
+
+    <!-- 빨간 불빛 --> 
+    <link name="red_light_link">
+      <pose>2.535 -0.28 2.538 1.57 0 0</pose> 
+      <visual name="red">
+        <geometry> 
+          <cylinder>
+            <radius>0.30</radius>
+            <length>0.1</length>
+          </cylinder>
+        </geometry>
+        <transparency>0.6</transparency>
+        <material>
+          <ambient>0.080 0.000 0.000 1</ambient>
+          <diffuse>0.080 0.000 0.000 1</diffuse>
+          <specular>1 1 1 1</specular>
+          <emissive>0 0 0 1</emissive>
+      </material>
+      </visual>
+    </link>
+
+    <!-- 노란 불빛 -->
+    <link name="yellow_light_link"> 
+      <pose>3.26 -0.293 2.538 1.57 0 0</pose> 
+      <visual name="yellow"> 
+        <geometry>
+          <cylinder>
+            <radius>0.30</radius>
+            <length>0.1</length>
+          </cylinder>
+        </geometry>
+        <transparency>0.6</transparency>
+        <material>
+          <ambient>0.080 0.080 0.000 1</ambient>
+          <diffuse>0.080 0.080 0.000 1</diffuse>
+          <specular>1 1 1 1</specular>
+          <emissive>0 0 0 1</emissive>
+        </material>
+      </visual>
+    </link>
+
+    <!-- 초록 불빛 -->
+    <link name="green_light_link"> 
+      <pose>3.984 -0.28 2.538 1.57 0 0</pose>
+      <visual name="green"> 
+        <geometry>
+          <cylinder>
+            <radius>0.30</radius>
+            <length>0.1</length>
+          </cylinder>
+        </geometry>
+        <transparency>0.6</transparency>
+        <material>
+          <ambient>0.000 0.080 0.000 1</ambient>
+          <diffuse>0.000 0.080 0.000 1</diffuse>
+          <specular>1 1 1 1</specular>
+          <emissive>0 0 0 1</emissive>
+        </material>
+      </visual>
+    </link>
+    
+  
+    <!-- https://classic.gazebosim.org/tutorials?tut=flashlight_plugin -->
+    <!-- ROS 토픽(/traffic_light/color)으로 렌즈 색을 실시간 제어 -->
+    <plugin name="traffic_light_controller" filename="libtraffic_light_plugin.so">
+      <topic>/traffic_light/color</topic>
+      <initial_color>red</initial_color>
+    </plugin>
+</model>
+</sdf>
