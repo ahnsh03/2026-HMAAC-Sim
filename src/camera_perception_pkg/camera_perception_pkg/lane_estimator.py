@@ -52,8 +52,14 @@ FIT_MIN_SPREAD = 60     # y 방향으로 이만큼은 퍼져 있어야 기울기
 FIT_QUAD_SPREAD = 150   # 이만큼 퍼지면 2차식까지 쓴다. 코너에서 곡률을 살리려면 낮아야 한다
 FIT_MAX_RESIDUAL = 45   # 잔차가 이보다 크면 맞춤 실패로 본다 [px]
 
-# 2차로 마스크의 왼쪽 끝이 중앙선 곡선과 이만큼 안에서 일치할 때만 믿는다 [px]
+# 2차로 마스크의 왼쪽 끝이 중앙선과 이만큼 안에서 일치할 때만 믿는다 [px]
 FIT_AGREE_TOL = 90.0
+
+# 곡선 맞춤 없이 행별로 중앙선 위치를 뽑을 때의 조건.
+# 점선이라 해당 행에 조각이 없을 수 있으므로 위아래로 넉넉히 본다.
+CL_ROW_WINDOW = 70      # 이 행 범위 안의 중앙선 점을 모은다 [px]
+CL_MIN_POINTS = 4       # 이보다 적으면 쓰지 않는다
+CL_GROUP_GAP = 60       # 이만큼 떨어지면 다른 선으로 본다 [px]
 
 
 def perspective_matrix(src_mat):
@@ -177,13 +183,22 @@ class LaneCenterEstimator:
             elif det.class_name == 'lane2':
                 lane2_polys.append(poly)
 
-        fit = None
+        fit, cl_bev = None, None
         if center_pts:
-            bev_pts = points_to_bev(np.vstack([np.asarray(p) for p in center_pts]), self.matrix)
-            fit = fit_center_line(bev_pts)
+            cl_bev = points_to_bev(np.vstack([np.asarray(p) for p in center_pts]), self.matrix)
+            cl_bev = cl_bev[(cl_bev[:, 0] >= 0) & (cl_bev[:, 0] < BEV_W) &
+                            (cl_bev[:, 1] >= 0) & (cl_bev[:, 1] < BEV_H)]
+            fit = fit_center_line(cl_bev)
 
         lane1_bev = mask_to_bev(lane1_polys, self.matrix) if lane1_polys else None
         lane2_bev = mask_to_bev(lane2_polys, self.matrix) if lane2_polys else None
+        # 라벨과 무관하게 '차로 영역'을 합쳐 둔다.
+        # 어떤 구간에서는 모델이 자차 차로를 lane1 으로 붙이기도 하는데,
+        # 자차 차로는 정의상 차가 들어 있는 차로이므로 라벨보다 위치가 확실하다.
+        if lane1_bev is not None and lane2_bev is not None:
+            lanes_bev = cv2.bitwise_or(lane1_bev, lane2_bev)
+        else:
+            lanes_bev = lane1_bev if lane1_bev is not None else lane2_bev
 
         # 가까운 행부터 훑으면서, 직전 행에서 찾은 중심을 다음 행의 기준으로 넘긴다.
         # 자차가 있는 차로에서 출발해 앞으로 따라가는 셈이라, 옆 차로나 갈라지는
@@ -191,9 +206,13 @@ class LaneCenterEstimator:
         centers, sources = {}, []
         ref_x = BEV_W / 2.0
         for row in sorted(rows, reverse=True):
-            left = self.left_boundary(row, fit, lane1_bev, lane2_bev, ref_x)
+            left = self.left_boundary(row, fit, lane1_bev, lane2_bev, ref_x, cl_bev)
             right = self.right_boundary(row, lane2_bev, ref_x)
-            x, src = self.combine(left, right)
+            x, src = self.combine(left, right,
+                                  cl_bev is not None and len(cl_bev) >= CL_MIN_POINTS)
+            if x is None:
+                # 마지막 수단: 차가 들어 있는 차로 영역의 좌우 끝을 그대로 쓴다.
+                x, src = self.ego_lane_center(lanes_bev, row, ref_x)
             if x is None:
                 continue
             x += self.center_offset
@@ -226,7 +245,29 @@ class LaneCenterEstimator:
             img[rows[valid], cols[valid].astype(np.int32)] = 255
         return img
 
-    def left_boundary(self, row, fit, lane1_bev, lane2_bev, ref_x=None):
+    @staticmethod
+    def center_line_x(cl_bev, row, ref_x=None):
+        """해당 행 부근 중앙선 점들의 x 중앙값. 곡선 맞춤이 실패해도 쓸 수 있다.
+
+        점선이라 특정 행에 조각이 없을 수 있어 위아래로 넉넉히 본다.
+        조각이 여러 개 흩어져 있으면 ref_x 에 가까운 쪽을 고른다.
+        """
+        if cl_bev is None or len(cl_bev) == 0:
+            return None
+        sel = cl_bev[np.abs(cl_bev[:, 1] - row) <= CL_ROW_WINDOW]
+        if len(sel) < CL_MIN_POINTS:
+            return None
+        xs = np.sort(sel[:, 0])
+        groups = np.split(xs, np.where(np.diff(xs) > CL_GROUP_GAP)[0] + 1)
+        groups = [g for g in groups if len(g) >= CL_MIN_POINTS]
+        if not groups:
+            return None
+        if ref_x is None:
+            ref_x = BEV_W / 2.0
+        best = min(groups, key=lambda g: abs(float(np.median(g)) - ref_x))
+        return float(np.median(best))
+
+    def left_boundary(self, row, fit, lane1_bev, lane2_bev, ref_x=None, cl_bev=None):
         """자차 차로의 왼쪽 경계(=중앙선) x.
 
         2차로 영역의 왼쪽 끝을 우선한다. 행마다 따로 재기 때문에 곡선을 그대로
@@ -242,22 +283,47 @@ class LaneCenterEstimator:
             if 0.0 <= x < BEV_W:
                 fit_x = x
 
+        # 곡선 맞춤이 실패해도 쓸 수 있는, 행별 중앙선 위치
+        cl_x = self.center_line_x(cl_bev, row, ref_x if ref_x is None else ref_x - self.lane_width / 2.0)
+        anchor = fit_x if fit_x is not None else cl_x
+
         if lane2_bev is not None:
             left, _ = region_edges(lane2_bev, row, ref_x)
             if left is not None and left > 2:
-                if fit_x is None or abs(left - fit_x) <= FIT_AGREE_TOL:
+                if anchor is None or abs(left - anchor) <= FIT_AGREE_TOL:
                     return left, 'lane2L'
 
         if fit_x is not None:
             return fit_x, 'fit'
+        if cl_x is not None:
+            return cl_x, 'cl'
 
-        # 1차로 영역의 오른쪽 끝도 중앙선이지만, 자차가 차로 안에 있다는 보장이 없어
-        # 단독으로는 쓰지 않는다 (combine 에서 lane2R 과 함께일 때만 채택).
+        # 1차로 영역의 오른쪽 끝도 중앙선이다. 다만 자차가 차로 안에 있다는 보장이
+        # 없으므로, 중앙선 점이 실제로 그 근처에 있을 때만 믿는다.
         if lane1_bev is not None:
             _, right = region_edges(lane1_bev, row, ref_x)
             if right is not None and right < BEV_W - 2:
                 return right, 'lane1'
         return None, None
+
+    def ego_lane_center(self, lanes_bev, row, ref_x):
+        """차가 들어 있는 차로 영역의 중심. 클래스 라벨을 믿을 수 없을 때 쓴다.
+
+        lane1/lane2 를 합친 마스크에서 ref_x 를 품고 있는 덩어리를 고르고,
+        그 폭이 차로 하나로 말이 될 때만 중심을 돌려준다.
+        """
+        if lanes_bev is None:
+            return None, None
+        left, right = region_edges(lanes_bev, row, ref_x)
+        if left is None:
+            return None, None
+        width = right - left
+        if not (LANE_WIDTH_MIN <= width <= LANE_WIDTH_MAX):
+            return None, None
+        if not (left - 20 <= ref_x <= right + 20):
+            # 자차가 그 덩어리 안에 있지 않으면 자차 차로가 아니다
+            return None, None
+        return (left + right) / 2.0, 'ego'
 
     def right_boundary(self, row, lane2_bev, ref_x=None):
         """자차 차로의 오른쪽 경계(=바깥쪽 실선) x."""
@@ -269,7 +335,7 @@ class LaneCenterEstimator:
             return None, None
         return right, 'lane2R'
 
-    def combine(self, left, right):
+    def combine(self, left, right, has_center_line=False):
         """좌우 경계에서 차로 중심을 만든다. 근거가 약하면 값을 내지 않는다.
 
         추정을 못 하는 것보다 나쁜 것은 틀린 값을 자신 있게 내는 것이다.
@@ -291,8 +357,12 @@ class LaneCenterEstimator:
             # 점선 중앙선보다 훨씬 안정적이므로, 하나만 믿어야 한다면 이쪽이다.
             return right_x - self.lane_width / 2.0, right_src
 
-        # 바깥쪽을 못 봤을 때만 중앙선에 기댄다.
-        # lane2 영역의 왼쪽 끝(lane2L)은 교차 구간에서 잘 새므로 단독으로는 안 쓴다.
-        if left_x is not None and left_src == 'fit':
+        # 바깥쪽을 못 봤을 때는 중앙선에 기댄다. 중앙선은 그 자체로 자차 차로의
+        # 왼쪽 경계이므로 단독으로도 쓸 수 있다.
+        if left_x is not None and left_src in ('fit', 'cl'):
+            return left_x + self.lane_width / 2.0, left_src
+        # lane1 오른쪽 끝은 중앙선을 실제로 본 프레임에서만 인정한다.
+        # 도로를 벗어났을 때 lane1 만 보고 차로를 지어내면 그럴듯한 오답이 나온다.
+        if left_x is not None and left_src == 'lane1' and has_center_line:
             return left_x + self.lane_width / 2.0, left_src
         return None, None

@@ -36,10 +36,9 @@ TARGET_POINT_YS = (20, 100, 180, 260, 340, 420)
 
 # 차로 중심을 오른쪽으로 이 만큼 민다 [BEV 픽셀, 약 103px = 1m]. 양수 = 오른쪽.
 # 좌우 쏠림이 남으면 이 값만 조정하면 된다.
-# 제어가 코너에서 안쪽으로 파고드는 몫이 남아 있어(트랙 텍스처 대조로 실측),
-# 목표를 바깥으로 조금 밀어 상쇄한다. 0 이면 +0.49m 안쪽, +80 이면 -0.44m 바깥이라
-# 그 중간을 쓴다.
-CENTER_OFFSET = 55.0
+# 원인을 가리기 전에는 0 으로 둔다. 이 값으로 편향을 덮으면 인지 문제인지
+# 제어 문제인지 구분할 수 없게 된다.
+CENTER_OFFSET = 0.0
 
 # 직전 프레임 대비 허용하는 중심 이동량 [px].
 # 인지가 약 29Hz 라 한 프레임(35ms)에 차로 중심이 움직일 수 있는 양은 크지 않다.
@@ -51,6 +50,11 @@ MAX_CONSECUTIVE_MISS = 3   # 연속 실패가 이만큼이면 기준을 버리�
 # 프레임 간 평활 계수. 1.0 이면 평활 없음.
 # 29Hz 에서 0.4 면 시정수가 약 85ms 라, 튐은 줄이면서 지연은 거의 안 생긴다.
 SMOOTH_ALPHA = 0.4
+
+# 어떤 행의 추정이 잠깐 비면 직전 값을 이만큼 유지한다 [s].
+# 인지가 어려운 구간에서 유효한 행이 2개로 줄면 경로가 직선이 되어 곡률을 잃는데,
+# 그게 오히려 차로 이탈을 키운다. 29Hz 이므로 0.3초는 약 9프레임이다.
+HOLD_SEC = 0.30
 
 # 이 개수 미만이면 경로를 만들 수 없으므로 아예 발행하지 않는다
 # (motion_planner 가 경로 끊김으로 판단해 감속한다)
@@ -110,6 +114,7 @@ class Yolov8InfoExtractor(Node):
 
         centers = self.reject_frame_jumps(centers)
         centers = self.smooth(centers)
+        centers = self.hold_missing(centers)
 
         if len(centers) < MIN_VALID_POINTS:
             self.miss_count += 1
@@ -159,6 +164,19 @@ class Yolov8InfoExtractor(Node):
             return centers
         return {y: x for y, x in centers.items()
                 if y not in self.prev_centers or abs(x - self.prev_centers[y]) <= MAX_FRAME_JUMP}
+
+    def hold_missing(self, centers):
+        """방금 추정하지 못한 행을 직전 값으로 잠깐 메운다.
+
+        곡률을 살리려면 경로에 점이 3개는 있어야 한다. 한두 행이 잠깐 비었다고
+        경로를 통째로 버리면 차가 인지 공백 구간에서 멈춰 버리고, 멈추면 시야가
+        그대로라 회복하지도 못한다.
+        """
+        if not self.prev_centers or self.now_sec() - self.prev_stamp > HOLD_SEC:
+            return centers
+        out = dict(self.prev_centers)
+        out.update(centers)
+        return out
 
     def smooth(self, centers):
         """프레임 간 평활. 한 프레임짜리 흔들림이 그대로 조향으로 가지 않게 한다.

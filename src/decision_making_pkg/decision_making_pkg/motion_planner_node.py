@@ -10,6 +10,7 @@ from rclpy.qos import QoSDurabilityPolicy
 from rclpy.qos import QoSReliabilityPolicy
 
 from std_msgs.msg import String, Bool
+from std_msgs.msg import Float32MultiArray
 from interfaces_pkg.msg import PathPlanningResult, DetectionArray, MotionCommand
 
 #---------------Variable Setting---------------
@@ -60,20 +61,19 @@ KAPPA_LPF = 0.30         # 프레임 간 저역통과 계수 (29Hz 에서 시정
 KAPPA_LIMIT = 0.30       # 곡률 상한 [1/m] (반경 3.3m). 이보다 급한 길은 없다
 
 # 순수추종의 코너 파고듦 보정 계수. 1.0 이면 기하학적 보정량(kappa*Ld^2/8) 그대로.
-# 실제로는 조향 지연까지 겹쳐 그보다 더 안쪽으로 들어가므로 조금 더 준다.
-K_CUT_COMP = 2.30
+# 0 = 보정 없음(순수추종 그대로). 원인을 먼저 가리기 위해 기본은 0 에서 시작한다.
+K_CUT_COMP = 0.0
 
 # 오차 되먹임의 점진 이득 문턱 [m]. 이 크기 오차에서 이득의 절반이 걸린다.
-# 작으면 민감(꿈틀거림), 크면 둔하다.
-E_SOFT = 0.12
+# 0 이면 점진 이득을 쓰지 않고 그대로 반응한다(사각지대 없음).
+E_SOFT = 0.0
 
 # 조향 배수. 1.0 이 기하학적으로 필요한 값 그대로다.
-# 1.18 로 키워봤더니 매 코너를 필요보다 tight 하게 돌아 안쪽으로 파고들었다.
 STEER_GAIN = 1.00
 
 STEER_RATE_LIMIT = 2.2   # 한 tick(TIMER) 당 조향 변화량 상한 [step].
                          # 20 step/s. 더 낮추면 S자 연속코너에서 못 따라간다.
-QUANT_HYST = 0.35        # 정수 조향을 바꾸는 문턱 [step]. 클수록 부드럽고 둔하다.
+QUANT_HYST = 0.0         # 정수 조향을 바꾸는 문턱 [step]. 0 이면 그냥 반올림.
                          # 크게 잡으면 사각지대가 되어 한쪽으로 밀린 채 안 돌아온다.
 
 #---------------속도---------------
@@ -99,7 +99,10 @@ STEER_FULL = 7.0         # 이 조향이면 V_MIN [step]
 # 인지 파이프라인 주기보다 넉넉히 잡는다.
 LANE_TIMEOUT = 1.0       # 이 시간 이상 새 경로가 없으면 인지 공백 [s]
 COAST_SPEED = 1.10       # 인지 공백 구간 통과 속도 [m/s]
-COAST_MAX_SEC = 3.0      # 이 시간까지만 타성 주행을 허용한다 [s]
+COAST_MAX_SEC = 6.0      # 이 시간까지만 타성 주행을 허용한다 [s].
+                         # 인지가 잠깐 끊기는 구간이 몇 미터쯤 되는데, 여기서 멈춰
+                         # 서면 시야가 그대로라 영영 회복하지 못한다. 저속으로
+                         # 통과할 만큼은 준다 (1.1m/s x 6s = 6.6m).
 SPEED_DECAY_TIME = 1.0   # 그 뒤 속도를 0까지 줄이는 데 걸리는 시간 [s]
 #----------------------------------------------
 
@@ -159,6 +162,7 @@ class MotionPlanningNode(Node):
         self.steer = 0.0         # 연속값 조향 [step]. 발행 직전에만 정수로 만든다
         self.speed_mps = 0.0     # 연속값 속도 [m/s]
         self.kappa = 0.0         # 저역통과한 경로 곡률 [1/m]
+        self.debug = None        # (주시거리, 횡방향, 곡률, 목표조향)
 
         self.steering_command = 0
         self.left_speed_command = 0
@@ -172,6 +176,8 @@ class MotionPlanningNode(Node):
 
         # 퍼블리셔 설정
         self.publisher = self.create_publisher(MotionCommand, self.pub_topic, self.qos_profile)
+        # 진단용: [주시거리 m, 그 지점 횡방향 m, 곡률 1/m, 목표조향 step, 실제조향 step]
+        self.debug_pub = self.create_publisher(Float32MultiArray, 'control_debug', self.qos_profile)
 
         # 타이머 설정
         self.timer = self.create_timer(self.timer_period, self.timer_callback)
@@ -232,6 +238,8 @@ class MotionPlanningNode(Node):
         그렇다고 사각지대를 두면 한쪽으로 밀린 채 안 돌아온다. 그래서 이득을
         |e|/(|e|+E_SOFT) 로 부드럽게 키운다. 0.2m 면 약 1/3, 1.0m 면 약 3/4 이 걸린다.
         """
+        if self.e_soft <= 0.0:
+            return err
         return err * abs(err) / (abs(err) + self.e_soft)
 
     def follow_lane(self):
@@ -256,6 +264,7 @@ class MotionPlanningNode(Node):
         delta = math.atan2(2.0 * WHEELBASE * lat_aim, dist * dist + lat_aim * lat_aim)
         target_steer = float(np.clip(self.steer_gain * delta / RAD_PER_STEP,
                                      -STEER_LIMIT, STEER_LIMIT))
+        self.debug = (dist, lat, kappa, target_steer)
 
         # 급격한 조향 변화는 차체를 흔들고 타이어를 미끄러뜨린다
         step = float(np.clip(target_steer - self.steer, -self.steer_rate_limit, self.steer_rate_limit))
@@ -309,6 +318,11 @@ class MotionPlanningNode(Node):
         motion_command_msg.left_speed = int(self.left_speed_command)
         motion_command_msg.right_speed = int(self.right_speed_command)
         self.publisher.publish(motion_command_msg)
+
+        if self.debug is not None:
+            dbg = Float32MultiArray()
+            dbg.data = [float(v) for v in self.debug] + [float(self.steer)]
+            self.debug_pub.publish(dbg)
 
     def update_commands(self):
         if self.lidar_data is not None and self.lidar_data.data is True:

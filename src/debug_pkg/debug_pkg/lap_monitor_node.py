@@ -11,8 +11,11 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, QoSHistoryPolicy, QoSDurabilityPolicy, QoSReliabilityPolicy
 
+import math
+
 import numpy as np
 
+from std_msgs.msg import Float32MultiArray
 from gazebo_msgs.msg import ModelStates
 from interfaces_pkg.msg import MotionCommand, PathPlanningResult
 
@@ -21,6 +24,7 @@ MODEL_NAME = "ego_vehicle"
 SUB_MODEL_STATES_TOPIC = "/gazebo/model_states"
 SUB_CONTROL_TOPIC = "topic_control_signal"
 SUB_PATH_TOPIC = "path_planning_result"
+SUB_CONTROL_DEBUG_TOPIC = "control_debug"
 
 # BEV <-> 실제 거리 환산. motion_planner 와 같은 규약.
 PX_PER_M_LAT = 103.6
@@ -69,6 +73,12 @@ class LapMonitorNode(Node):
         self.speed = 0
         self.lane_err = float('nan')   # 전방 5m 차로 중심의 횡방향 [m]. 양수면 차가 왼쪽
         self.kappa = 0.0               # 경로 곡률 [1/m]
+        # 제어기가 실제로 본 값과 낸 값 (control_debug 토픽)
+        self.ld = float('nan')         # 전방 주시거리 [m]
+        self.lat = float('nan')        # 그 지점의 차로 중심 횡방향 [m]
+        self.ctrl_kappa = float('nan') # 제어기가 쓴 곡률 [1/m]
+        self.target_steer = float('nan')
+        self.steer_cont = float('nan')
         self.lane_err_sum = 0.0
         self.lane_err_bias = 0.0
         self.lane_err_max = 0.0
@@ -76,7 +86,14 @@ class LapMonitorNode(Node):
 
         self.csv_file = open(self.csv_path, 'w', newline='')
         self.csv_writer = csv.writer(self.csv_file)
-        self.csv_writer.writerow(['t', 'x', 'y', 'distance', 'steering', 'speed', 'lane_err'])
+        # 인지가 문제인지 제어가 문제인지 나중에 가릴 수 있도록,
+        # 자세 / 인지 결과 / 제어 명령을 같은 시각에 함께 남긴다.
+        self.csv_writer.writerow([
+            't', 'x', 'y', 'yaw',          # 지상진실 자세
+            'distance', 'lane_err',        # 주행거리, 전방 5m 차로중심 횡방향
+            'ld', 'lat', 'kappa',          # 제어기가 본 것: 주시거리, 그 지점 횡방향, 곡률
+            'target_steer', 'steer_cont',  # 제어기가 원한 조향(연속)
+            'steering', 'speed'])          # 실제 발행한 명령
 
         self.create_subscription(ModelStates, SUB_MODEL_STATES_TOPIC,
                                  self.model_states_callback, qos_profile)
@@ -84,6 +101,8 @@ class LapMonitorNode(Node):
                                  self.control_callback, qos_profile)
         self.create_subscription(PathPlanningResult, SUB_PATH_TOPIC,
                                  self.path_callback, qos_profile)
+        self.create_subscription(Float32MultiArray, SUB_CONTROL_DEBUG_TOPIC,
+                                 self.control_debug_callback, qos_profile)
 
         self.get_logger().info(f"랩 모니터 시작. 궤적: {self.csv_path}")
 
@@ -93,6 +112,11 @@ class LapMonitorNode(Node):
     def control_callback(self, msg: MotionCommand):
         self.steering = msg.steering
         self.speed = msg.left_speed
+
+    def control_debug_callback(self, msg: Float32MultiArray):
+        if len(msg.data) >= 5:
+            (self.ld, self.lat, self.ctrl_kappa,
+             self.target_steer, self.steer_cont) = msg.data[:5]
 
     def path_callback(self, msg: PathPlanningResult):
         """차량 위치에서 차로 중심이 옆으로 벗어난 양 [m]. 양수면 차가 왼쪽에 있다.
@@ -121,6 +145,10 @@ class LapMonitorNode(Node):
 
         pose = msg.pose[msg.name.index(self.model_name)]
         xy = (pose.position.x, pose.position.y)
+        # prius 모델의 전방축이 -Y 라 모델 yaw 에서 90도를 빼야 진행방향이다
+        q = pose.orientation
+        yaw = math.atan2(2.0 * (q.w * q.z + q.x * q.y),
+                         1.0 - 2.0 * (q.y * q.y + q.z * q.z)) - math.pi / 2
         now = self.now_sec()
 
         if self.start_xy is None:
@@ -137,9 +165,12 @@ class LapMonitorNode(Node):
         self.distance += step
         self.last_xy = xy
 
-        self.csv_writer.writerow([f"{now - self.start_time:.2f}", f"{xy[0]:.3f}", f"{xy[1]:.3f}",
-                                  f"{self.distance:.2f}", self.steering, self.speed,
-                                  f"{self.lane_err:.3f}"])
+        self.csv_writer.writerow([
+            f"{now - self.start_time:.2f}", f"{xy[0]:.3f}", f"{xy[1]:.3f}", f"{yaw:.4f}",
+            f"{self.distance:.2f}", f"{self.lane_err:.3f}",
+            f"{self.ld:.2f}", f"{self.lat:.3f}", f"{self.ctrl_kappa:.4f}",
+            f"{self.target_steer:.2f}", f"{self.steer_cont:.2f}",
+            self.steering, self.speed])
         # 직선 구간에서만 통계를 낸다. 곡선에서는 차가 중앙에 있어도 전방 지점의
         # 횡방향 값이 0 이 아니라, 섞으면 의미 없는 숫자가 된다.
         if (self.speed > 0 and self.lane_err == self.lane_err

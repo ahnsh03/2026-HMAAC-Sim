@@ -43,7 +43,8 @@ class PathPlannerNode(Node):
         # 타겟 지점 받아오기
         self.target_points = msg.target_points
 
-        # 스플라인에 최소 3점이 필요하다
+        # 스플라인에 최소 3점이 필요하다. 2점짜리 직선 경로는 곡선 구간에서
+        # 곡률을 통째로 잃어 오히려 차로 이탈을 키운다.
         if len(self.target_points) >= 3:
             self.plan_path()
 
@@ -77,12 +78,14 @@ class PathPlannerNode(Node):
         self.get_logger().info(f"Planning path with {len(y_points)} points",
                                throttle_duration_sec=2.0)
 
-        # 스플라인 보간법을 사용하여 경로 생성
-        cs = CubicSpline(y_points, x_points, bc_type='natural')
-
         # 생성된 경로 점들 (추가적인 점들을 생성하여 부드러운 경로를 얻음)
         y_new = np.linspace(min(y_points), max(y_points), 100)
-        x_new = cs(y_new)
+        if len(y_points) >= 3:
+            # 스플라인 보간법을 사용하여 경로 생성
+            x_new = CubicSpline(y_points, x_points, bc_type='natural')(y_new)
+        else:
+            # 인지가 어려운 구간에서 두 점만 남을 때가 있다. 직선으로라도 잇는다.
+            x_new = np.interp(y_new, y_points, x_points)
 
         # 경로를 따라가는 정보 (PathPlanningResult 메시지로 발행)
         path_msg = PathPlanningResult()
