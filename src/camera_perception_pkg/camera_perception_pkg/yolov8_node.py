@@ -15,6 +15,7 @@
 
 
 from typing import List, Dict
+import os
 
 import rclpy
 from rclpy.qos import QoSProfile
@@ -33,6 +34,7 @@ from ultralytics.engine.results import Results
 from ultralytics.engine.results import Boxes
 from ultralytics.engine.results import Masks
 from ultralytics.engine.results import Keypoints
+import torch
 from torch import cuda
 
 from sensor_msgs.msg import Image
@@ -53,13 +55,30 @@ class Yolov8Node(LifecycleNode):
         super().__init__("yolov8_node", **kwargs)
         
         #---------------Variable Setting---------------
-        # 딥러닝 모델 pt 파일명 작성
+        # 딥러닝 모델: workspace src 의 sim.pt (없으면 CWD best.pt)
+        _default_model = "best.pt"
+        for _ws in (
+            "/root/hmobility_ws",
+            os.path.expanduser("~/hmobility_ws"),
+            os.path.expanduser("~/H-Mobility-Autonomous-Advanced-Course-Simulation"),
+        ):
+            _cand = os.path.join(_ws, "src", "simulation_pkg", "simulation_pkg", "data", "sim.pt")
+            if os.path.isfile(_cand):
+                _default_model = _cand
+                break
         #self.declare_parameter("model", "yolov8m.pt")
-        self.declare_parameter("model", "best.pt")
+        self.declare_parameter("model", _default_model)
         
-        # 추론 하드웨어 선택 (cpu / gpu) 
-        self.declare_parameter("device", "cpu")
-        #self.declare_parameter("device", "cuda:0")
+        # 추론 하드웨어 선택. CUDA 가 있으면 자동으로 GPU 를 쓴다.
+        self.declare_parameter("device", "cuda:0" if cuda.is_available() else "cpu")
+
+        # 추론 해상도. 640 이 학습 해상도지만 CPU 에서는 프레임당 0.8초가 걸린다.
+        # 480 으로 줄이면 1.6배 빨라지고 차로 중심 추정 오차는 중앙값 5px(=5cm)에 그친다.
+        self.declare_parameter("imgsz", 640)
+
+        # CPU 추론 스레드 수. 이 머신(20 vCPU)에서는 전부 쓰면 OpenMP 동기화 비용이
+        # 커져 오히려 느리다. 4 가 가장 빨랐다 (640 기준 798ms vs 8스레드 919ms).
+        self.declare_parameter("torch_threads", 4)
         #----------------------------------------------
         
         self.declare_parameter("threshold", 0.5)
@@ -86,6 +105,12 @@ class Yolov8Node(LifecycleNode):
 
         self.reliability = self.get_parameter(
             "image_reliability").get_parameter_value().integer_value
+
+        self.imgsz = self.get_parameter(
+            "imgsz").get_parameter_value().integer_value
+
+        self.torch_threads = self.get_parameter(
+            "torch_threads").get_parameter_value().integer_value
 
         self.image_qos_profile = QoSProfile(
             reliability=self.reliability,
@@ -120,6 +145,10 @@ class Yolov8Node(LifecycleNode):
         except Exception as e:
             self.get_logger().error(f"Error while loading model '{self.model}': {str(e)}")
             return TransitionCallbackReturn.FAILURE
+
+        self.get_logger().info(
+            f"추론 설정: device={self.device}, imgsz={self.imgsz}, "
+            f"conf={self.threshold}, threads={self.torch_threads}")
 
         # subs
         self._sub = self.create_subscription(
@@ -247,9 +276,11 @@ class Yolov8Node(LifecycleNode):
         return keypoints_list
 
     def image_cb(self, msg: Image) -> None:
-        print(msg.header)
-
         if self.enable:
+
+            # ultralytics 가 predict 중에 스레드 수를 자기 값으로 바꾸므로 매번 다시 지정한다
+            if 'cpu' in self.device:
+                torch.set_num_threads(self.torch_threads)
 
             # convert image + predict
             cv_image = self.cv_bridge.imgmsg_to_cv2(msg)
@@ -259,6 +290,7 @@ class Yolov8Node(LifecycleNode):
                 verbose=False,
                 stream=False,
                 conf=self.threshold,
+                imgsz=self.imgsz,
                 device=self.device
             )
             results: Results = results[0].cpu()

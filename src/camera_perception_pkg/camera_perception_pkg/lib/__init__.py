@@ -3,9 +3,8 @@ import types
 import marshal
 
 def get_path(file_name=None):
-    p = os.path.dirname(os.path.abspath(__file__)).split("/")
-    LIB_PATH = os.path.join("/", *p[1:4], "src", *p[5:6],*p[5:6], "lib", file_name)
-    return LIB_PATH
+    # Load libs next to this file (works under /root/hmobility_ws and symlink-install)
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), file_name)
 
 def get_pyc(module_file):
     file_path = get_path(module_file)

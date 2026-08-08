@@ -9,7 +9,7 @@ from scipy.interpolate import CubicSpline
 #---------------Variable Setting---------------
 SUB_LANE_TOPIC_NAME = "yolov8_lane_info"  # lane_info_extractor 노드에서 퍼블리시하는 타겟 지점 토픽
 PUB_TOPIC_NAME = "path_planning_result"   # 경로 계획 결과 퍼블리시 토픽
-CAR_CENTER_POINT = (320, 179) # 이미지 상에서 차량 앞 범퍼의 중심이 위치한 픽셀 좌표
+CAR_CENTER_POINT = (320, 479) # 이미지 상에서 차량 앞 범퍼의 중심이 위치한 픽셀 좌표 (ROI 맨 아래 중앙)
 
 #----------------------------------------------
 class PathPlannerNode(Node):
@@ -39,11 +39,11 @@ class PathPlannerNode(Node):
         self.publisher = self.create_publisher(PathPlanningResult, self.pub_topic, self.qos_profile)
 
     def lane_callback(self, msg: LaneInfo):
-        
+
         # 타겟 지점 받아오기
         self.target_points = msg.target_points
-        
-        # 타겟 지점이 3개 이상 모이면 경로 계획 시작
+
+        # 스플라인에 최소 3점이 필요하다
         if len(self.target_points) >= 3:
             self.plan_path()
 
@@ -56,20 +56,26 @@ class PathPlannerNode(Node):
         # TargetPoint 객체에서 x, y 값 추출
         x_points, y_points = zip(*[(tp.target_x, tp.target_y) for tp in self.target_points])
 
-        #차량 앞 범퍼의 중심이 위치한 픽셀 좌표 추가
-        y_points_list, x_points_list = list(y_points), list(x_points) 
-        y_points_list.append(self.car_center_point[1])
-        x_points_list.append(self.car_center_point[0])
-        y_points, x_points = tuple(y_points_list), tuple(x_points_list)
-        
+        # 차량 중심점(320, 479)은 경로에 넣지 않는다.
+        # 그 점은 "차가 지금 차로 중앙에 있다"고 강제하는 가짜 구속이라, 경로 아래쪽
+        # 구간의 횡방향 오차를 실제보다 작게 만든다. 전방 주시점이 그 구간에 걸리면
+        # 조향이 필요량보다 작게 나와 코너에서 바깥으로 밀린다.
+
         # y 값을 기준으로 정렬 (y가 증가하는 순서로 정렬)
         sorted_points = sorted(zip(y_points, x_points), key=lambda point: point[0])
 
         # 정렬된 y, x 값을 다시 분리
         y_points, x_points = zip(*sorted_points)
-        
+
+        # 같은 행이 두 번 들어오면 CubicSpline 이 예외를 던지고 노드가 죽는다
+        if len(set(y_points)) != len(y_points):
+            self.get_logger().warn("타겟 지점의 y 가 중복되어 경로를 만들지 않는다",
+                                   throttle_duration_sec=2.0)
+            return
+
         # 몇개의 점으로 경로 계획을 하는지 확인
-        self.get_logger().info(f"Planning path with {len(y_points)} points")
+        self.get_logger().info(f"Planning path with {len(y_points)} points",
+                               throttle_duration_sec=2.0)
 
         # 스플라인 보간법을 사용하여 경로 생성
         cs = CubicSpline(y_points, x_points, bc_type='natural')

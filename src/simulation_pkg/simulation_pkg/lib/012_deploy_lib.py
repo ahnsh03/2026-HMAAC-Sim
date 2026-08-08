@@ -28,19 +28,36 @@ def check_and_download_model(file, destination_path):
 
     
 HOME = os.path.expanduser("~")
-    
+
+def _find_workspace_root():
+    """Locate the colcon workspace that contains src/simulation_pkg/models."""
+    d = os.path.dirname(os.path.abspath(__file__))
+    for _ in range(12):
+        if os.path.isdir(os.path.join(d, "src", "simulation_pkg", "models")):
+            return d
+        parent = os.path.dirname(d)
+        if parent == d:
+            break
+        d = parent
+    for candidate in (
+        "/root/hmobility_ws",
+        os.path.join(HOME, "hmobility_ws"),
+        os.path.join(HOME, "H-Mobility-Autonomous-Advanced-Course-Simulation"),
+        os.getcwd(),
+    ):
+        if os.path.isdir(os.path.join(candidate, "src", "simulation_pkg", "models")):
+            return candidate
+    raise FileNotFoundError(
+        "Cannot locate workspace with src/simulation_pkg/models"
+    )
+
 def get_base_path(extra_dirs=None, repeat_last=False):
-    # p = os.path.dirname(os.path.abspath(__file__)).split("/")
-    p = os.path.dirname(os.path.abspath(__name__)).split("/")
-    pkg = "simulation_pkg"
-    BASE_PATH = os.path.join("/", *p[1:4], "src", pkg)
-
+    ws = _find_workspace_root()
+    BASE_PATH = os.path.join(ws, "src", "simulation_pkg")
     if repeat_last:
-        BASE_PATH = os.path.join(BASE_PATH, pkg)
-
+        BASE_PATH = os.path.join(BASE_PATH, "simulation_pkg")
     if extra_dirs:
         BASE_PATH = os.path.join(BASE_PATH, *extra_dirs)
-    
     return BASE_PATH
 
 def get_pkg(): # 패키지 경로

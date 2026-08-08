@@ -10,3 +10,6 @@ __pycache__/
 # 단, lib/pyc 안의 것은 코스에서 제공하는 라이브러리라 반드시 추적해야 한다
 !src/*/*/lib/pyc/
 !src/*/*/lib/pyc/*.pyc
+
+# 분석 산출물 (생성물이라 추적하지 않는다)
+tools/out/
