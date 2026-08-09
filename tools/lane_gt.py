@@ -22,6 +22,23 @@ TEX = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..",
                    "src/simulation_pkg/models/race_track/materials/textures/basic_track_2026.jpg")
 SIZE_LX, SIZE_LY = 53.83, 40.473
 CAR_HALF_WIDTH = 0.88          # 차폭 1.7526m 의 절반
+# 점선 중앙선이 놓인 거리 [m, 잔디 경계 기준]. 차로 폭이 3.03~3.35m 이므로
+# 중앙선은 바깥 실선에서 그만큼 안쪽이다. 이 밴드로 제한하면 안쪽 실선과
+# 주차장 표시가 중앙선으로 잘못 잡히지 않는다.
+CENTER_LINE_BAND = (2.4, 4.4)
+
+# 트랙 텍스처 단면을 직접 재서 얻은 차선 기하 [m].
+#   잔디 경계  -24.39
+#   바깥 실선  -24.28 ~ -24.16  (두께 0.12)
+#   점선 중앙선 -21.30 ~ -21.18  (두께 0.12)
+# dist_out 은 잔디까지, dist_in 은 점선의 가까운 면까지 잰다. 그래서
+#   - 두 거리가 같아지는 지점은 진짜 차로 중앙보다 CENTER_BIAS 만큼 바깥이다
+#   - 바깥 실선을 밟는 것은 잔디에 닿기 전, dist_out < OUTER_LINE_REACH 일 때다
+GRASS_TO_LINE = 0.11           # 잔디 경계에서 바깥 실선 바깥 면까지
+LINE_WIDTH = 0.12              # 차선 두께
+OUTER_LINE_REACH = GRASS_TO_LINE + LINE_WIDTH   # 잔디에서 실선 안쪽 면까지
+CENTER_BIAS = 0.115            # (dist_out - dist_in)/2 가 0 인 지점의 바깥쪽 치우침
+DASH_MAX_AREA = 300            # 점선 한 칸의 픽셀 넓이 상한. 횡단보도 등 큰 표시를 뺀다
 # 차체를 한 점으로 보면 코너에서 뒷바퀴가 안쪽을 파고드는 것(off-tracking)을
 # 놓친다. model_states 가 주는 위치는 앞뒤 축의 중간이므로, 거기서 앞뒤로
 # 축간거리의 절반씩 떨어진 두 축의 좌우 끝, 즉 네 모서리를 모두 본다.
@@ -40,21 +57,29 @@ def build():
     # 바깥 경계: 잔디까지의 거리
     dist_out = cv2.distanceTransform((grass == 0).astype(np.uint8), cv2.DIST_L2, 5) * m_per_px
 
-    # 링(도로) 위의 흰 표시만 남긴다. 주차장(연회색)과 그 표시는 제외해야 하므로,
-    # 잔디에서 너무 멀리 떨어진 곳은 버린다. 링 폭이 6~7m 이므로 8m 로 자른다.
+    # 링(도로) 위의 흰 표시만 남긴다.
+    # 밝기 분포를 재보면 도로 아스팔트 72, 주차장 바닥 118, 차선 223 이상이라
+    # 200 으로 자르면 주차장 바닥은 확실히 빠진다.
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     ring = (grass == 0) & (dist_out < 8.0)
-    white = ((gray > 150) & ring).astype(np.uint8)
+    white = (gray > 200) & ring
 
-    # 바깥 실선은 잔디 바로 옆이므로 제외하면 점선 중앙선만 남는다
-    dashed = (white > 0) & (dist_out > 0.9)
+    # 점선 중앙선은 바깥 실선에서 차로 폭(약 3.2m)만큼 안쪽에 있다.
+    # 그 거리 밴드로 제한하면 바깥 실선, 안쪽 실선, 주차장 표시가 모두 빠진다.
+    dashed = (white & (dist_out > CENTER_LINE_BAND[0]) & (dist_out < CENTER_LINE_BAND[1]))
     dashed = dashed.astype(np.uint8)
 
-    # 끊긴 조각을 이어 붙인다. 점선 간격이 약 1.5m 이므로 그보다 큰 커널로 닫는다
-    k = int(round(2.2 / m_per_px))
+    # 횡단보도 줄무늬가 밴드에 걸치는 곳이 한 군데 있다. 점선 한 칸은 약 1.5m x 0.15m
+    # (약 37 px) 이므로, 그보다 훨씬 큰 덩어리는 점선이 아니다.
+    n, labels, stats, _ = cv2.connectedComponentsWithStats(dashed, 8)
+    for i in range(1, n):
+        if stats[i, cv2.CC_STAT_AREA] > DASH_MAX_AREA:
+            dashed[labels == i] = 0
+
+    # 끊긴 조각을 이어 붙인다. 커널이 크면 주변 표시까지 뭉개므로 점선 간격만큼만.
+    k = int(round(1.2 / m_per_px)) | 1
     dashed = cv2.morphologyEx(dashed, cv2.MORPH_CLOSE,
                               cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k)))
-    # 링 밖으로 번진 부분 제거
     dashed = (dashed > 0) & ring
 
     dist_in = cv2.distanceTransform((dashed == 0).astype(np.uint8), cv2.DIST_L2, 5) * m_per_px
@@ -76,7 +101,7 @@ def evaluate(wx, wy, gt=None):
     cu, cv_ = to_px(wx, wy, w, h)
     d_out = dist_out[cv_, cu]
     d_in = dist_in[cv_, cu]
-    return (d_out - d_in) / 2.0, d_out, d_in
+    return (d_out - d_in) / 2.0 - CENTER_BIAS, d_out, d_in
 
 
 def body_clearance(wx, wy, yaw, gt=None):
@@ -100,7 +125,8 @@ def body_clearance(wx, wy, yaw, gt=None):
             cu, cv_ = to_px(px, py, w, h)
             c_in = np.minimum(c_in, dist_in[cv_, cu])
             c_out = np.minimum(c_out, dist_out[cv_, cu])
-    return c_in, c_out
+    # 바깥쪽은 잔디가 아니라 실선 안쪽 면이 경계다
+    return c_in, c_out - OUTER_LINE_REACH
 
 
 if __name__ == "__main__":
@@ -112,8 +138,9 @@ if __name__ == "__main__":
     x = np.array([float(r["x"]) for r in rows])
     y = np.array([float(r["y"]) for r in rows])
     dev, d_out, d_in = evaluate(x, y, gt)
-    lane_w = d_out + d_in
-    print("차로 폭 실측: 중앙값 %.2f m (범위 %.2f~%.2f)"
+    # 선 중심 사이 간격 = (잔디~점선 가까운면) - 잔디여백 - 선두께/2 + 선두께/2
+    lane_w = d_out + d_in - GRASS_TO_LINE - LINE_WIDTH / 2 + LINE_WIDTH / 2
+    print("차로 폭(차선 중심 간격) 실측: 중앙값 %.2f m (범위 %.2f~%.2f)"
           % (np.median(lane_w), np.percentile(lane_w, 5), np.percentile(lane_w, 95)))
     print("이탈량: 평균 %+.2f m, 평균|.| %.2f m, 90분위|.| %.2f m"
           % (dev.mean(), np.abs(dev).mean(), np.percentile(np.abs(dev), 90)))
