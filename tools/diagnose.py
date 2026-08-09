@@ -29,6 +29,8 @@ import sys
 import cv2
 import numpy as np
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
 TEX = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..",
                    "src/simulation_pkg/models/race_track/materials/textures/basic_track_2026.jpg")
 SIZE_LX, SIZE_LY = 53.83, 40.473   # 지면 크기 [m]
@@ -37,32 +39,26 @@ CAR_HALF_WIDTH = 0.88              # 차폭 1.7526m 의 절반
 TOUCH = HALF_LANE - CAR_HALF_WIDTH  # 이만큼 벗어나면 차체가 차선에 닿는다
 
 
+import lane_gt
+
+
 def load_track():
-    img = cv2.imread(os.path.normpath(TEX))
-    h, w = img.shape[:2]
-    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-    grass = cv2.inRange(hsv, (35, 60, 40), (90, 255, 255))
-    dist_m = cv2.distanceTransform((grass == 0).astype(np.uint8), cv2.DIST_L2, 5) \
-        * ((SIZE_LX / w + SIZE_LY / h) / 2)
-    return grass, dist_m, w, h
+    return lane_gt.build()
 
 
-def to_px(wx, wy, w, h):
-    """월드 -> 텍스처 픽셀. 지면 로컬 (lx, ly) = (wy, -wx), v 는 뒤집혀 있다."""
-    u = (np.asarray(wy) + SIZE_LX / 2) / SIZE_LX
-    v = 1 - (-np.asarray(wx) + SIZE_LY / 2) / SIZE_LY
-    return (np.clip(u * (w - 1), 0, w - 1)).astype(int), (np.clip(v * (h - 1), 0, h - 1)).astype(int)
+def deviation(wx, wy, gt):
+    """진짜 차로 중앙에서 벗어난 양 [m]. 양수면 안쪽(점선 쪽).
 
-
-def deviation(wx, wy, grass, dist_m, w, h):
-    """진짜 차로 중앙에서 벗어난 양 [m]. 양수면 안쪽(중앙선 쪽)."""
-    cu, cv_ = to_px(wx, wy, w, h)
-    return dist_m[cv_, cu] - HALF_LANE
+    차로 폭을 상수로 가정하지 않고, 바깥 실선과 점선 중앙선까지의 거리를
+    직접 재서 그 중점을 차로 중앙으로 삼는다.
+    """
+    dev, _, _ = lane_gt.evaluate(wx, wy, gt)
+    return dev
 
 
 def main():
     path = sys.argv[1] if len(sys.argv) > 1 else "/tmp/lap_trajectory.csv"
-    grass, dist_m, w, h = load_track()
+    gt = load_track()
 
     rows = [r for r in csv.DictReader(open(path)) if int(r["speed"]) > 0]
     if not rows:
@@ -76,7 +72,7 @@ def main():
 
     # 총 오차: 차량 위치가 진짜 차로 중앙에서 벗어난 양.
     # dist_m 은 잔디까지의 거리라 '안쪽이 양수'다. 차량 오른쪽(바깥) 기준으로 뒤집는다.
-    total = -deviation(x, y, grass, dist_m, w, h)
+    total = -deviation(x, y, gt)
 
     # 인지가 지목한 전방 주시점을 월드로 옮긴다.
     # 차량 오른쪽 방향은 진행방향을 -90도 돌린 것: (sin yaw, -cos yaw)
@@ -85,7 +81,7 @@ def main():
     py = y + ld * np.sin(yaw) - lat * np.cos(yaw)
     # 그 지점이 진짜 차로 중앙에서 벗어난 양 = 인지 오차
     percep = np.full(len(x), np.nan)
-    percep[ok] = -deviation(px[ok], py[ok], grass, dist_m, w, h)
+    percep[ok] = -deviation(px[ok], py[ok], gt)
 
     # 제어 오차 = 총 오차 - 인지 오차
     control = total - percep
@@ -119,9 +115,11 @@ def main():
         stat("인지 오차", percep[sel])
         stat("제어 오차", control[sel])
 
-    touching = np.abs(total) > TOUCH
-    print("\n차선 밟음(|총오차| > %.2f m) %.1f%%,  차선 넘음(> %.2f m) %.1f%%"
-          % (TOUCH, 100 * touching.mean(), HALF_LANE, 100 * (np.abs(total) > HALF_LANE).mean()))
+    _, d_out, d_in = lane_gt.evaluate(x, y, gt)
+    print("\n점선 밟음 %.1f%%  (차체가 점선에 닿음, 차폭 %.2fm 반영)"
+          % (100 * (d_in < lane_gt.CAR_HALF_WIDTH).mean(), 2 * lane_gt.CAR_HALF_WIDTH))
+    print("실선 밟음 %.1f%%  (차체가 바깥 실선에 닿음)"
+          % (100 * (d_out < lane_gt.CAR_HALF_WIDTH).mean()))
 
     bad = np.argsort(-np.abs(total))[:8]
     print("\n총오차 큰 지점:")

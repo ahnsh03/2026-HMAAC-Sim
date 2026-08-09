@@ -40,9 +40,9 @@ TARGET_POINT_YS = (20, 100, 180, 260, 330, 390, 435, 470)
 
 # 차로 중심을 오른쪽으로 이 만큼 민다 [BEV 픽셀, 약 103px = 1m]. 양수 = 오른쪽.
 # 좌우 쏠림이 남으면 이 값만 조정하면 된다.
-# 원인을 가리기 전에는 0 으로 둔다. 이 값으로 편향을 덮으면 인지 문제인지
-# 제어 문제인지 구분할 수 없게 된다.
-CENTER_OFFSET = 0.0
+# 구조적 원인(앞먹임 시점, 곡률 추정 구간)을 모두 손본 뒤에도 남는 잔차만
+# 여기서 상쇄한다. 트랙 텍스처 기준으로 재보니 코너에서 평균 0.24m 안쪽이었다.
+CENTER_OFFSET = 25.0
 
 # 직전 프레임 대비 허용하는 중심 이동량 [px].
 # 인지가 약 29Hz 라 한 프레임(35ms)에 차로 중심이 움직일 수 있는 양은 크지 않다.
@@ -121,7 +121,8 @@ class Yolov8InfoExtractor(Node):
             return
 
         try:
-            centers, debug = self.estimator.estimate(detection_msg.detections, TARGET_POINT_YS)
+            centers, debug = self.estimator.estimate(
+                detection_msg.detections, TARGET_POINT_YS, self.tracked_ref())
             self.sources = debug['sources']
         except Exception as exc:  # 한 프레임이 이상해도 노드가 죽으면 안 된다
             self.get_logger().error(f"차로 추정 실패: {exc}", throttle_duration_sec=2.0)
@@ -162,6 +163,16 @@ class Yolov8InfoExtractor(Node):
 
     def now_sec(self):
         return self.get_clock().now().nanoseconds * 1e-9
+
+    def tracked_ref(self):
+        """직전 프레임에서 추적하던 차로의 위치 (가장 가까운 행의 중심).
+
+        이걸 다음 프레임 탐색의 출발점으로 주면 같은 차로를 계속 따라간다.
+        오래된 값은 쓰지 않는다.
+        """
+        if not self.prev_centers or self.now_sec() - self.prev_stamp > PREV_VALID_SEC:
+            return None
+        return self.prev_centers[max(self.prev_centers)]
 
     @staticmethod
     def center_slope_deg(centers):

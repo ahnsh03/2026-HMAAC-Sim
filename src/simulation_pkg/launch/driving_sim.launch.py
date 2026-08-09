@@ -51,7 +51,7 @@ def generate_launch_description():
                               description='YOLO 추론 해상도. CPU 라면 480 이 1.6배 빠르다'),
         DeclareLaunchArgument('conf', default_value='0.5',
                               description='YOLO confidence 임계값'),
-        DeclareLaunchArgument('center_offset', default_value='0.0',
+        DeclareLaunchArgument('center_offset', default_value='25.0',
                               description='차로 중심 보정 [BEV 픽셀, 약 103px=1m]. 양수면 오른쪽'),
         DeclareLaunchArgument('v_max', default_value='2.4',
                               description='직선 최고 속도 [m/s]'),

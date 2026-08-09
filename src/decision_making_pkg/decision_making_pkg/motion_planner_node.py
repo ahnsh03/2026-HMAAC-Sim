@@ -72,6 +72,8 @@ E_LIMIT = 1.2            # 횡오차 제한 [m]. 인지가 튀어도 급조향�
 KAPPA_LPF = 0.30         # 프레임 간 저역통과 계수 (29Hz 에서 시정수 약 0.14초).
                          # 너무 느리면 조향은 미리 꺾이는데 바깥보정이 늦게 들어와
                          # 코너 진입에서 안쪽으로 파고든다.
+KAPPA_NEAR_SPAN = 2.6    # 앞먹임 곡률을 재는 구간 길이 [m]. 경로 앞쪽 절반쯤.
+KAPPA_MIN_SPAN = 1.8     # 경로가 이보다 짧으면 곡률을 갱신하지 않고 유지한다 [m]
 KAPPA_LIMIT = 0.13       # 곡률 상한 [1/m] (반경 7.7m).
                          # GT 경로에서 잰 이 트랙의 최대 곡률이 약 0.10 이다.
                          # 예전 값 0.30 은 반경 3.3m 로, 노이즈를 그대로 통과시켰다.
@@ -90,6 +92,7 @@ K_CUT_COMP = 0.0
 # 그래서 곡률로 계산한 정상선회 조향 atan(축간거리*곡률) 을 하한으로 깐다.
 # 순수추종이 이미 그만큼 내고 있으면 아무 일도 하지 않는다.
 K_FF_DEFICIT = 1.0
+FF_DEFICIT_LPF = 0.15    # 부족분 평활 계수. 켜짐/꺼짐이 조향에 그대로 나타나지 않게 한다
 
 # 오차 되먹임의 점진 이득 문턱 [m]. 이 크기 오차에서 이득의 절반이 걸린다.
 # 0 이면 점진 이득을 쓰지 않고 그대로 반응한다(사각지대 없음).
@@ -100,8 +103,10 @@ STEER_GAIN = 1.00
 
 STEER_RATE_LIMIT = 2.2   # 한 tick(TIMER) 당 조향 변화량 상한 [step].
                          # 20 step/s. 더 낮추면 S자 연속코너에서 못 따라간다.
-QUANT_HYST = 0.0         # 정수 조향을 바꾸는 문턱 [step]. 0 이면 그냥 반올림.
-                         # 크게 잡으면 사각지대가 되어 한쪽으로 밀린 채 안 돌아온다.
+QUANT_HYST = 0.30        # 정수 조향을 바꾸는 문턱 [step]. 0 이면 그냥 반올림인데,
+                         # 연속값이 두 칸 경계 근처면 매 tick 칸을 오가며 직선에서도
+                         # 조향이 꿈틀거린다. 크게 잡으면 사각지대가 되어 한쪽으로
+                         # 밀린 채 안 돌아오므로 0.3 정도만 준다.
 
 #---------------속도---------------
 # 속도 명령은 0~255 이고 v[m/s] = speed / 51 이다 (MAX_SPEED=5 기준).
@@ -194,6 +199,7 @@ class MotionPlanningNode(Node):
         self.steer = 0.0         # 연속값 조향 [step]. 발행 직전에만 정수로 만든다
         self.speed_mps = 0.0     # 연속값 속도 [m/s]
         self.kappa = 0.0         # 저역통과한 경로 곡률 [1/m]
+        self.ff_deficit = 0.0    # 저역통과한 앞먹임 부족분 [rad]
         self.debug = None        # (주시거리, 횡방향, 곡률, 목표조향)
         self.lat_err = 0.0       # 곡률 성분을 뺀 진짜 횡오차 [m]
 
@@ -263,6 +269,20 @@ class MotionPlanningNode(Node):
         """
         s = row_to_ahead(self.path_y)
         d = (self.path_x - CAR_CENTER_X) / PX_PER_M_LAT
+
+        # 앞먹임에 쓰는 곡률은 경로 앞쪽 절반(차량에 가까운 쪽)만으로 잰다.
+        # 경로 전체로 평균내면 차가 아직 직선에 있어도 먼 곳이 휘어 있다는 이유로
+        # 미리 꺾어 코너 진입에서 점선 쪽으로 붙는다.
+        # 경로가 너무 짧으면 곡률을 믿을 수 없다. S자처럼 시야가 좁아지는 구간에서
+        # 이때 곡률을 0 으로 떨어뜨리면 앞먹임이 사라져 코너 중간에 조향을 놓아버리고
+        # 그대로 직진해 버린다. 그런 프레임에서는 직전 곡률을 유지한다.
+        span = float(s.max() - s.min())
+        if span < KAPPA_MIN_SPAN:
+            return self.kappa
+
+        near = s <= (s.min() + KAPPA_NEAR_SPAN)
+        if near.sum() >= 8:
+            s, d = s[near], d[near]
         raw = 2.0 * float(np.polyfit(s, d, 2)[0])
         raw = float(np.clip(raw, -KAPPA_LIMIT, KAPPA_LIMIT))
         self.kappa += self.kappa_lpf * (raw - self.kappa)
@@ -300,11 +320,17 @@ class MotionPlanningNode(Node):
         delta = math.atan2(2.0 * WHEELBASE * lat_aim, dist * dist + lat_aim * lat_aim)
 
         # 곡률이 큰 구간에서 순수추종이 모자란 만큼만 채운다. 부호는 곡률을 따른다.
+        #
+        # 부족분을 그대로 더하면, 곡률은 평활돼 있는데 순수추종 값은 노이지해서
+        # 둘의 대소가 뒤바뀔 때마다 보정이 켜졌다 꺼졌다 하며 조향이 튄다.
+        # 완만한 곡선에서 좌우로 흔들리는 원인이 이것이라, 부족분 자체를 평활한다.
         delta_ff = math.atan(WHEELBASE * kappa)
+        deficit = 0.0
         if delta_ff * delta >= 0.0:
-            deficit = abs(delta_ff) - abs(delta)
-            if deficit > 0.0:
-                delta += math.copysign(self.k_ff_deficit * deficit, delta_ff)
+            deficit = max(0.0, abs(delta_ff) - abs(delta))
+        self.ff_deficit += FF_DEFICIT_LPF * (deficit - self.ff_deficit)
+        if delta_ff != 0.0:
+            delta += math.copysign(self.k_ff_deficit * self.ff_deficit, delta_ff)
 
         target_steer = float(np.clip(self.steer_gain * delta / RAD_PER_STEP,
                                      -STEER_LIMIT, STEER_LIMIT))

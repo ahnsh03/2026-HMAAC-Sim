@@ -22,6 +22,8 @@ center_line 은 점선이라 특정 행에 조각이 없을 수 있으므로, �
 모아 x = f(y) 곡선으로 맞춘 뒤 원하는 행에서 값을 읽는다.
 """
 
+import math
+
 import cv2
 import numpy as np
 
@@ -45,6 +47,7 @@ BAND_HALF = 6
 RUN_GAP = 15
 RUN_MIN_WIDTH = 40                # 이보다 좁으면 노이즈
 RUN_MAX_WIDTH_RATIO = 1.15        # 차로 폭 상한의 이 배를 넘으면 마스크가 샌 것
+MAX_TILT = math.radians(65)       # 기울기 보정 상한. 이보다 누우면 더 늘리지 않는다
 
 # center_line 곡선 맞춤 조건
 FIT_MIN_POINTS = 8      # 이보다 적으면 곡선을 믿지 않는다
@@ -118,13 +121,18 @@ def fit_center_line(bev_points):
     return coeff
 
 
-def region_edges(bev_mask, row, ref_x=None):
+def region_edges(bev_mask, row, ref_x=None, tilt=0.0):
     """영역 마스크에서 해당 행의 좌우 끝. 픽셀이 없으면 (None, None).
 
     행 전체의 최소/최대를 그냥 쓰면, 교차 구간에서 마스크가 주차장이나 옆 도로로
     새는 순간 끝점이 이미지 가장자리까지 끌려가 차로 중심이 통째로 밀린다.
     그래서 끊긴 덩어리로 나눈 뒤 차로 하나로 볼 만한 폭을 가진 덩어리만 쓰고,
     그 중 ref_x(직전 행에서 찾은 중심)에 가장 가까운 것을 고른다.
+
+    tilt 는 그 행에서 차로가 기울어진 각도 [rad] 다. BEV 에서 차로가 기울면
+    가로로 자른 폭이 실제 폭의 1/cos(tilt) 배가 된다. 60도면 두 배다.
+    이걸 반영하지 않으면 급코너에서 멀쩡한 행을 '너무 넓다'며 통째로 버리고,
+    그 결과 조향을 놓아버린다.
     """
     band = bev_mask[max(0, row - BAND_HALF): row + BAND_HALF, :]
     if band.size == 0:
@@ -136,10 +144,13 @@ def region_edges(bev_mask, row, ref_x=None):
     if ref_x is None:
         ref_x = BEV_W / 2.0
 
+    # 기울어진 만큼 폭 상한을 늘린다
+    widen = 1.0 / max(math.cos(min(abs(tilt), MAX_TILT)), 0.35)
+
     best = None
     for run in np.split(cols, np.where(np.diff(cols) > RUN_GAP)[0] + 1):
         width = float(run[-1] - run[0])
-        if width < RUN_MIN_WIDTH or width > LANE_WIDTH_MAX * RUN_MAX_WIDTH_RATIO:
+        if width < RUN_MIN_WIDTH or width > LANE_WIDTH_MAX * RUN_MAX_WIDTH_RATIO * widen:
             continue
         if run[0] <= ref_x <= run[-1]:
             dist = 0.0
@@ -163,12 +174,16 @@ class LaneCenterEstimator:
         self.center_offset = float(center_offset)
         # 디버그 이미지를 다시 계산하지 않도록 마지막 프레임의 BEV 레이어를 남겨둔다
         self._last = None
+        # 차로가 BEV 에서 기울어진 각도 [rad]. 폭 판정을 보정하는 데 쓴다.
+        self.tilt = 0.0
 
-    def estimate(self, detections, rows):
+    def estimate(self, detections, rows, ref_x0=None):
         """(centers, debug) 를 돌려준다.
 
         centers 는 {row: x} 이고, 추정에 실패한 행은 아예 넣지 않는다.
         debug 는 어느 근거를 썼는지 세어둔 것.
+        ref_x0 는 직전 프레임에서 추적하던 차로의 위치다. 이걸 주면 같은 차로를
+        계속 따라간다. 주지 않으면 차량 중심에서 시작한다.
         """
         center_pts, lane1_polys, lane2_polys = [], [], []
         for det in detections:
@@ -203,8 +218,15 @@ class LaneCenterEstimator:
         # 가까운 행부터 훑으면서, 직전 행에서 찾은 중심을 다음 행의 기준으로 넘긴다.
         # 자차가 있는 차로에서 출발해 앞으로 따라가는 셈이라, 옆 차로나 갈라지는
         # 도로의 마스크를 잘못 물고 가는 일이 줄어든다.
+        # 중앙선 곡선이 있으면 그 기울기로, 없으면 직전 값을 유지한다
+        if fit is not None:
+            slope = float(np.polyval(np.polyder(fit, 1), BEV_H * 0.7))
+            self.tilt = math.atan(slope)
+
         centers, sources = {}, {}
-        ref_x = BEV_W / 2.0
+        # 직전 프레임에서 보던 차로에서 이어서 찾는다. 매번 차량 중심에서 시작하면
+        # 두 차로가 모두 후보일 때 프레임마다 다른 차로를 물어 값이 통째로 튄다.
+        ref_x = BEV_W / 2.0 if ref_x0 is None else float(ref_x0)
         for row in sorted(rows, reverse=True):
             left = self.left_boundary(row, fit, lane1_bev, lane2_bev, ref_x, cl_bev)
             right = self.right_boundary(row, lane2_bev, ref_x)
@@ -288,7 +310,7 @@ class LaneCenterEstimator:
         anchor = fit_x if fit_x is not None else cl_x
 
         if lane2_bev is not None:
-            left, _ = region_edges(lane2_bev, row, ref_x)
+            left, _ = region_edges(lane2_bev, row, ref_x, self.tilt)
             if left is not None and left > 2:
                 if anchor is None or abs(left - anchor) <= FIT_AGREE_TOL:
                     return left, 'lane2L'
@@ -301,7 +323,7 @@ class LaneCenterEstimator:
         # 1차로 영역의 오른쪽 끝도 중앙선이다. 다만 자차가 차로 안에 있다는 보장이
         # 없으므로, 중앙선 점이 실제로 그 근처에 있을 때만 믿는다.
         if lane1_bev is not None:
-            _, right = region_edges(lane1_bev, row, ref_x)
+            _, right = region_edges(lane1_bev, row, ref_x, self.tilt)
             if right is not None and right < BEV_W - 2:
                 return right, 'lane1'
         return None, None
@@ -314,10 +336,10 @@ class LaneCenterEstimator:
         """
         if lanes_bev is None:
             return None, None
-        left, right = region_edges(lanes_bev, row, ref_x)
+        left, right = region_edges(lanes_bev, row, ref_x, self.tilt)
         if left is None:
             return None, None
-        width = right - left
+        width = (right - left) * math.cos(min(abs(self.tilt), MAX_TILT))
         if not (LANE_WIDTH_MIN <= width <= LANE_WIDTH_MAX):
             return None, None
         if not (left - 20 <= ref_x <= right + 20):
@@ -329,7 +351,7 @@ class LaneCenterEstimator:
         """자차 차로의 오른쪽 경계(=바깥쪽 실선) x."""
         if lane2_bev is None:
             return None, None
-        _, right = region_edges(lane2_bev, row, ref_x)
+        _, right = region_edges(lane2_bev, row, ref_x, self.tilt)
         if right is None or right > BEV_W - 3:
             # 이미지 끝에 붙었으면 실제 경계가 아니라 잘린 것이다.
             return None, None
@@ -348,7 +370,7 @@ class LaneCenterEstimator:
 
         if right_x is not None:
             if left_x is not None:
-                width = right_x - left_x
+                width = (right_x - left_x) * math.cos(min(abs(self.tilt), MAX_TILT))
                 if LANE_WIDTH_MIN <= width <= LANE_WIDTH_MAX:
                     # 좌우가 모두 잡히고 폭도 말이 되면 중점이 가장 정확하다.
                     # 차로 폭 상수가 조금 틀려도 영향을 받지 않는다.
