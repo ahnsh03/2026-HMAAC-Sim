@@ -102,6 +102,26 @@ K_OFFTRACK = 1.0
 # 그래서 곡률로 계산한 정상선회 조향 atan(축간거리*곡률) 을 하한으로 깐다.
 # 순수추종이 이미 그만큼 내고 있으면 아무 일도 하지 않는다.
 K_FF_DEFICIT = 1.0
+
+# 직진 락온.
+#
+# 직선에서 GT 도로곡률로 계산한 이상 조향은 -0.02칸, 즉 사실상 0 이다.
+# 그런데 인지 곡률은 직선에서도 표준편차 0.080 이라 앞먹임 atan(축간거리*곡률)이
+# ±2.45칸의 잡음을 그대로 조향에 넣는다. 순수추종 항의 잡음(±0.67칸)보다 4배 크다.
+# 직진 우블링의 정체가 이것이다.
+#
+# 그래서 곡률이 충분히 작으면 앞먹임을 아예 끄고 순수추종 되먹임만 쓴다.
+# 켜고 끄는 문턱을 다르게 둬서(히스테리시스) 경계에서 깜빡이지 않게 한다.
+# 앞먹임을 꺼도 횡오차 되먹임은 그대로 살아 있으므로 차로는 계속 유지된다.
+KAPPA_STRAIGHT_ON = 0.045    # |곡률| 이 이 아래면 직진으로 보고 앞먹임을 끈다 (반경 22m)
+KAPPA_STRAIGHT_OFF = 0.070   # 이 위로 올라가면 직진 모드를 푼다 (반경 14m)
+
+# 앞먹임에 쓰는 곡률의 압축 계수 [m].
+# GT 도로곡률과 견줘 보니 완만한 곡선에서는 0.42칸 부족하고 급코너에서는
+# 0.74칸 과다였다. 즉 곡률이 클수록 과하게 반응한다. 큰 곡률만 눌러
+# kappa_ff = kappa / (1 + K_FF_COMPRESS * |kappa|) 로 압축한다.
+# 0 이면 압축 없음.
+K_FF_COMPRESS = 0.0
 FF_DEFICIT_LPF = 1.0     # 부족분 평활 계수. 1.0 이면 평활하지 않는다.
                          # 여기서 따로 평활하면 아래 TARGET_LPF 와 겹쳐 지연만 쌓인다.
                          # 평활은 최종 조향 한 곳에서만 한다.
@@ -194,6 +214,9 @@ class MotionPlanningNode(Node):
         self.ld_base = self.declare_parameter('ld_base', LD_BASE).value
         self.k_cut_comp = self.declare_parameter('k_cut_comp', K_CUT_COMP).value
         self.k_ff_deficit = self.declare_parameter('k_ff_deficit', K_FF_DEFICIT).value
+        self.k_ff_compress = self.declare_parameter('k_ff_compress', K_FF_COMPRESS).value
+        self.kappa_straight_on = self.declare_parameter('kappa_straight_on', KAPPA_STRAIGHT_ON).value
+        self.kappa_straight_off = self.declare_parameter('kappa_straight_off', KAPPA_STRAIGHT_OFF).value
         self.k_offtrack = self.declare_parameter('k_offtrack', K_OFFTRACK).value
         self.e_soft = self.declare_parameter('e_soft', E_SOFT).value
         self.steer_gain = self.declare_parameter('steer_gain', STEER_GAIN).value
@@ -222,6 +245,7 @@ class MotionPlanningNode(Node):
         self.speed_mps = 0.0     # 연속값 속도 [m/s]
         self.kappa = 0.0         # 저역통과한 경로 곡률 [1/m]
         self.ff_deficit = 0.0    # 저역통과한 앞먹임 부족분 [rad]
+        self.straight_mode = True  # 직진 락온 상태
         self.quant_err = 0.0     # 정수화하며 버린 조향 (시그마-델타용)
         self.steer_lpf = 0.0     # 저역통과한 목표 조향 [step]
         self.debug = None        # (주시거리, 횡방향, 곡률, 목표조향)
@@ -360,7 +384,20 @@ class MotionPlanningNode(Node):
         # 부족분을 그대로 더하면, 곡률은 평활돼 있는데 순수추종 값은 노이지해서
         # 둘의 대소가 뒤바뀔 때마다 보정이 켜졌다 꺼졌다 하며 조향이 튄다.
         # 완만한 곡선에서 좌우로 흔들리는 원인이 이것이라, 부족분 자체를 평활한다.
-        delta_ff = math.atan(WHEELBASE * kappa)
+        # 직진 락온: 곡률이 충분히 작으면 앞먹임을 끄고 순수추종만 쓴다
+        ak = abs(kappa)
+        if self.straight_mode:
+            if ak > self.kappa_straight_off:
+                self.straight_mode = False
+        elif ak < self.kappa_straight_on:
+            self.straight_mode = True
+
+        if self.straight_mode:
+            kappa_ff = 0.0
+        else:
+            # 곡률이 클수록 앞먹임을 조금 눌러 급코너 과조향을 줄인다
+            kappa_ff = kappa / (1.0 + self.k_ff_compress * abs(kappa))
+        delta_ff = math.atan(WHEELBASE * kappa_ff)
         deficit = 0.0
         if delta_ff * delta >= 0.0:
             deficit = max(0.0, abs(delta_ff) - abs(delta))
