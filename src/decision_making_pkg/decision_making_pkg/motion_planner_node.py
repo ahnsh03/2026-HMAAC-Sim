@@ -106,8 +106,9 @@ K_OFFTRACK = 1.0
 # 그래서 곡률로 계산한 정상선회 조향 atan(축간거리*곡률) 을 하한으로 깐다.
 # 순수추종이 이미 그만큼 내고 있으면 아무 일도 하지 않는다.
 K_FF_DEFICIT = 1.0
-FF_DEFICIT_LPF = 0.30    # 부족분 평활 계수. 켜짐/꺼짐이 조향에 그대로 나타나지 않게 한다.
-                         # 너무 낮으면 S자처럼 곡률이 뒤집히는 구간에서 반응이 늦다.
+FF_DEFICIT_LPF = 1.0     # 부족분 평활 계수. 1.0 이면 평활하지 않는다.
+                         # 여기서 따로 평활하면 아래 TARGET_LPF 와 겹쳐 지연만 쌓인다.
+                         # 평활은 최종 조향 한 곳에서만 한다.
 
 # 오차 되먹임의 점진 이득 문턱 [m]. 이 크기 오차에서 이득의 절반이 걸린다.
 # 0 이면 점진 이득을 쓰지 않고 그대로 반응한다(사각지대 없음).
@@ -116,8 +117,17 @@ E_SOFT = 0.0
 # 조향 배수. 1.0 이 기하학적으로 필요한 값 그대로다.
 STEER_GAIN = 1.00
 
-STEER_RATE_LIMIT = 2.2   # 한 tick(TIMER) 당 조향 변화량 상한 [step].
-                         # 20 step/s. 더 낮추면 S자 연속코너에서 못 따라간다.
+# 최종 조향의 1차 저역통과 계수. 조향 평활은 여기 한 곳에서만 한다.
+#
+# GT 곡률로 만든 이상 조향과 견줘 보니, 실제 조향은 1.0초 늦고 방향 반전이
+# 3.1배 많았다 (297회 -> 925회). 지연과 진동이 함께 있다는 뜻이라, 여러 곳에
+# 흩어져 있던 저역통과를 걷어내고 한 곳으로 모았다.
+# 0.45 면 10Hz 에서 시정수 약 0.19초.
+TARGET_LPF = 0.45
+
+STEER_RATE_LIMIT = 3.0   # 한 tick(TIMER) 당 조향 변화량 상한 [step].
+                         # 평활은 TARGET_LPF 가 하므로, 여기서는 한 프레임짜리
+                         # 오검출이 그대로 넘어가지 않게 막는 정도만 한다.
 SIGMA_DELTA = True       # 정수 조향의 성긴 단차를 시간평균으로 메운다
 QUANT_HYST = 0.30        # 정수 조향을 바꾸는 문턱 [step]. 0 이면 그냥 반올림인데,
                          # 연속값이 두 칸 경계 근처면 매 tick 칸을 오가며 직선에서도
@@ -218,6 +228,7 @@ class MotionPlanningNode(Node):
         self.kappa = 0.0         # 저역통과한 경로 곡률 [1/m]
         self.ff_deficit = 0.0    # 저역통과한 앞먹임 부족분 [rad]
         self.quant_err = 0.0     # 정수화하며 버린 조향 (시그마-델타용)
+        self.steer_lpf = 0.0     # 저역통과한 목표 조향 [step]
         self.debug = None        # (주시거리, 횡방향, 곡률, 목표조향)
         self.lat_err = 0.0       # 곡률 성분을 뺀 진짜 횡오차 [m]
 
@@ -363,8 +374,10 @@ class MotionPlanningNode(Node):
         self.debug = (dist, lat, kappa, target_steer)
         self.lat_err = e
 
-        # 급격한 조향 변화는 차체를 흔들고 타이어를 미끄러뜨린다
-        step = float(np.clip(target_steer - self.steer, -self.steer_rate_limit, self.steer_rate_limit))
+        # 평활은 여기 한 곳에서만 한다. 저역통과 뒤에 변화량 상한을 건다.
+        self.steer_lpf += TARGET_LPF * (target_steer - self.steer_lpf)
+        step = float(np.clip(self.steer_lpf - self.steer,
+                             -self.steer_rate_limit, self.steer_rate_limit))
         self.steer += step
 
         # 감속은 길의 곡률만 보고 정한다. 조향 명령을 그대로 쓰면 오차가 흔들릴 때마다
