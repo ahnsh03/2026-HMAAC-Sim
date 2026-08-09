@@ -63,6 +63,9 @@ FIT_AGREE_TOL = 90.0
 CL_ROW_WINDOW = 70      # 이 행 범위 안의 중앙선 점을 모은다 [px]
 CL_MIN_POINTS = 4       # 이보다 적으면 쓰지 않는다
 CL_GROUP_GAP = 60       # 이만큼 떨어지면 다른 선으로 본다 [px]
+# 추적 중인 차로의 중앙선에서 이만큼 떨어진 조각은 다른 선으로 보고 버린다 [px].
+# 차로 폭(328)의 절반보다 조금 넉넉하게 잡아 코너에서 휘는 것을 허용한다.
+CL_SELECT_TOL = 200.0
 
 
 def perspective_matrix(src_mat):
@@ -200,10 +203,30 @@ class LaneCenterEstimator:
 
         fit, cl_bev = None, None
         if center_pts:
-            cl_bev = points_to_bev(np.vstack([np.asarray(p) for p in center_pts]), self.matrix)
-            cl_bev = cl_bev[(cl_bev[:, 0] >= 0) & (cl_bev[:, 0] < BEV_W) &
-                            (cl_bev[:, 1] >= 0) & (cl_bev[:, 1] < BEV_H)]
-            fit = fit_center_line(cl_bev)
+            # 조각(점선 한 칸)마다 따로 BEV 로 옮겨, 추적 중인 차로의 중앙선에서
+            # 너무 먼 조각은 버린다. 이 트랙에는 주차장 진입로 표시도 center_line
+            # 으로 잡히는 구간이 있어, 다 섞어 곡선을 맞추면 엉뚱한 선을 문다.
+            expected = None if ref_x0 is None else float(ref_x0) - self.lane_width / 2.0
+            kept = []
+            for poly in center_pts:
+                b = points_to_bev(np.asarray(poly), self.matrix)
+                b = b[(b[:, 0] >= 0) & (b[:, 0] < BEV_W) &
+                      (b[:, 1] >= 0) & (b[:, 1] < BEV_H)]
+                if len(b) == 0:
+                    continue
+                if expected is not None and abs(float(np.median(b[:, 0])) - expected) > CL_SELECT_TOL:
+                    continue
+                kept.append(b)
+            if not kept:      # 다 걸러졌으면 원래대로 전부 쓴다
+                for poly in center_pts:
+                    b = points_to_bev(np.asarray(poly), self.matrix)
+                    b = b[(b[:, 0] >= 0) & (b[:, 0] < BEV_W) &
+                          (b[:, 1] >= 0) & (b[:, 1] < BEV_H)]
+                    if len(b):
+                        kept.append(b)
+            if kept:
+                cl_bev = np.vstack(kept)
+                fit = fit_center_line(cl_bev)
 
         lane1_bev = mask_to_bev(lane1_polys, self.matrix) if lane1_polys else None
         lane2_bev = mask_to_bev(lane2_polys, self.matrix) if lane2_polys else None

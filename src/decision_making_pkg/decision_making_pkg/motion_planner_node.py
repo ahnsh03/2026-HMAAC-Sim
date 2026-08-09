@@ -46,13 +46,19 @@ RAD_PER_STEP = MAX_STEER_RAD / STEER_LIMIT
 # 부호 규약: 경로가 오른쪽이면 조향 양수 -> simulation_sender 가 STEERING=-1 을
 # 곱해 우조향이 된다.
 
-# 전방 주시거리 Ld = K_LD * v + LD_BASE [m, 뒷차축 기준]
+# 전방 주시거리 Ld [m, 뒷차축 기준]. 속도와 곡률에 따라 움직인다.
 # BEV 가 뒷차축 앞 4.74m 부터 보이므로 그보다 짧게는 잡을 수 없다.
-# 길게 잡을수록 부드럽지만 코너를 덜 꺾는다.
+#
+# 속도만 반영하면 사실상 고정값(2.4m/s 에서 5.43m)이 되는데, 순수추종은
+# 조준점이 코너에 들어가는 순간부터 꺾기 시작하므로 차는 코너보다 5.4m 앞서
+# 꺾어 버린다. 코너 진입 전에 안쪽으로 붙는 원인이 이것이다.
+# 그래서 전방이 휘어 있으면 주시거리를 줄여 늦게, 대신 제때 꺾게 한다.
+# 직선에서는 길게 잡아 부드럽게 간다.
 K_LD = 0.70
 LD_BASE = 3.75
 LD_MIN = 4.85            # BEV 맨 아랫줄(4.74m)까지 쓸 수 있도록 낮춘다
 LD_MAX = 6.40
+KAPPA_REF = 0.035        # 이 곡률(반경 29m)에서 주시거리 단축이 절반쯤 걸린다
 
 # 조향은 두 몫으로 나눈다.
 #   앞먹임 = atan(축간거리 * 곡률).  곡선을 도는 데 필요한 몫. 곡률을 시간적으로
@@ -82,6 +88,14 @@ KAPPA_LIMIT = 0.13       # 곡률 상한 [1/m] (반경 7.7m).
 # 0 = 보정 없음(순수추종 그대로).
 K_CUT_COMP = 0.0
 
+# 뒷축 안쪽 파고듦(off-tracking) 보정 계수.
+# 코너에서 뒷축은 앞축보다 안쪽을 지나므로, 기준점만 차로 중앙에 맞추면
+# 차체 일부가 안쪽 차선을 밟는다. 그 양은 축간거리^2 * 곡률 / 8 이다
+# (축간거리 2.86m, 곡률 0.1 이면 0.10m).
+# 실측에서도 뒷축이 앞축보다 0.13m 더 안쪽이었다.
+# 1.0 이면 기하학적 계산값 그대로 바깥으로 민다.
+K_OFFTRACK = 1.0
+
 # 곡률이 큰 구간에서 순수추종이 내는 조향의 부족분을 앞먹임으로 메우는 비율.
 #
 # 순수추종은 원호 위에서는 정확하지만, 코너 반경이 전방 주시거리보다 짧아지면
@@ -92,7 +106,8 @@ K_CUT_COMP = 0.0
 # 그래서 곡률로 계산한 정상선회 조향 atan(축간거리*곡률) 을 하한으로 깐다.
 # 순수추종이 이미 그만큼 내고 있으면 아무 일도 하지 않는다.
 K_FF_DEFICIT = 1.0
-FF_DEFICIT_LPF = 0.15    # 부족분 평활 계수. 켜짐/꺼짐이 조향에 그대로 나타나지 않게 한다
+FF_DEFICIT_LPF = 0.30    # 부족분 평활 계수. 켜짐/꺼짐이 조향에 그대로 나타나지 않게 한다.
+                         # 너무 낮으면 S자처럼 곡률이 뒤집히는 구간에서 반응이 늦다.
 
 # 오차 되먹임의 점진 이득 문턱 [m]. 이 크기 오차에서 이득의 절반이 걸린다.
 # 0 이면 점진 이득을 쓰지 않고 그대로 반응한다(사각지대 없음).
@@ -103,6 +118,7 @@ STEER_GAIN = 1.00
 
 STEER_RATE_LIMIT = 2.2   # 한 tick(TIMER) 당 조향 변화량 상한 [step].
                          # 20 step/s. 더 낮추면 S자 연속코너에서 못 따라간다.
+SIGMA_DELTA = True       # 정수 조향의 성긴 단차를 시간평균으로 메운다
 QUANT_HYST = 0.30        # 정수 조향을 바꾸는 문턱 [step]. 0 이면 그냥 반올림인데,
                          # 연속값이 두 칸 경계 근처면 매 tick 칸을 오가며 직선에서도
                          # 조향이 꿈틀거린다. 크게 잡으면 사각지대가 되어 한쪽으로
@@ -174,6 +190,7 @@ class MotionPlanningNode(Node):
         self.ld_base = self.declare_parameter('ld_base', LD_BASE).value
         self.k_cut_comp = self.declare_parameter('k_cut_comp', K_CUT_COMP).value
         self.k_ff_deficit = self.declare_parameter('k_ff_deficit', K_FF_DEFICIT).value
+        self.k_offtrack = self.declare_parameter('k_offtrack', K_OFFTRACK).value
         self.e_soft = self.declare_parameter('e_soft', E_SOFT).value
         self.steer_gain = self.declare_parameter('steer_gain', STEER_GAIN).value
         self.kappa_lpf = self.declare_parameter('kappa_lpf', KAPPA_LPF).value
@@ -200,6 +217,7 @@ class MotionPlanningNode(Node):
         self.speed_mps = 0.0     # 연속값 속도 [m/s]
         self.kappa = 0.0         # 저역통과한 경로 곡률 [1/m]
         self.ff_deficit = 0.0    # 저역통과한 앞먹임 부족분 [rad]
+        self.quant_err = 0.0     # 정수화하며 버린 조향 (시그마-델타용)
         self.debug = None        # (주시거리, 횡방향, 곡률, 목표조향)
         self.lat_err = 0.0       # 곡률 성분을 뺀 진짜 횡오차 [m]
 
@@ -307,7 +325,11 @@ class MotionPlanningNode(Node):
         """
         kappa = self.update_curvature()
 
-        # 속도가 붙을수록 멀리 본다. 흔들림을 줄이고 코너 진입을 부드럽게 한다.
+        # 속도가 붙을수록 멀리 보고, 전방이 휘어 있으면 가까이 본다.
+        # 곡선에서 멀리 보면 코너에 들어가기도 전에 꺾어 안쪽으로 붙는다.
+        # 곡률로 주시거리를 줄여도 봤는데 역효과였다. 짧은 주시거리는 순수추종의
+        # 이득을 키워(delta ~ lat/Ld^2) 오히려 더 파고들었다.
+        # 안쪽 치우침 0.44 -> 0.59m, 점선 밟음 29.0 -> 31.3%.
         lookahead = float(np.clip(self.k_ld * self.speed_mps + self.ld_base, LD_MIN, LD_MAX))
         dist, lat = self.path_point(lookahead)
 
@@ -316,6 +338,9 @@ class MotionPlanningNode(Node):
         lat_curve = kappa * dist * dist / 2.0
         lat_err = lat - lat_curve
         lat_aim = lat_curve + self.soft_gain(lat_err) + self.k_cut_comp * kappa * dist * dist / 8.0
+        # 뒷축이 안쪽을 파고드는 만큼 조준점을 바깥으로 민다.
+        # 왼쪽 코너(kappa<0)면 오른쪽(+)으로, 오른쪽 코너면 왼쪽(-)으로.
+        lat_aim -= self.k_offtrack * kappa * WHEELBASE * WHEELBASE / 8.0
 
         delta = math.atan2(2.0 * WHEELBASE * lat_aim, dist * dist + lat_aim * lat_aim)
 
@@ -452,14 +477,26 @@ class MotionPlanningNode(Node):
         self.right_speed_command = self.left_speed_command
 
     def quantize_steer(self):
-        """연속 조향을 정수 -7..7 로 만든다. 히스테리시스로 떨림을 막는다.
+        """연속 조향을 정수 -7..7 로 만든다.
 
-        한 칸이 5.3도로 성기기 때문에, 연속값이 두 칸 사이에 있으면 매 tick 마다
-        칸을 오가며 조향이 눈에 띄게 튄다. 그래서 지금 칸에서 QUANT_HYST 이상
-        벗어날 때만 칸을 바꾼다.
-        이렇게 하면 ±QUANT_HYST 만큼 사각지대가 생기지만, 횡오차 되먹임(K_E)이
-        이득을 채워주므로 직선에서 한쪽으로 밀리지는 않는다.
+        한 칸이 5.29도로 성기다. 반경으로 치면 2칸이 15.3m, 3칸이 10.1m 라
+        그 사이 값을 낼 수 없어 구간별 단차가 크다.
+
+        SIGMA_DELTA 를 켜면 정수화하며 버린 몫을 다음 tick 으로 넘겨서
+        (1차 잡음성형) 조향의 시간평균이 연속값과 같아진다. 2.5칸이 필요하면
+        3,2,3,2 를 번갈아 내보내는 식이다. 한 tick 에 한 칸까지만 움직이도록
+        묶어 눈에 띄는 튐은 막는다.
+
+        끄면 히스테리시스 방식이다. 지금 칸에서 QUANT_HYST 이상 벗어날 때만
+        칸을 바꾼다. 떨림은 없지만 그만큼 사각지대가 생긴다.
         """
+        if SIGMA_DELTA:
+            acc = self.steer + self.quant_err
+            raw = int(np.clip(round(acc), -STEER_LIMIT, STEER_LIMIT))
+            raw = int(np.clip(raw, self.steering_command - 1, self.steering_command + 1))
+            self.quant_err = float(np.clip(acc - raw, -1.0, 1.0))
+            return raw
+
         if abs(self.steer - self.steering_command) <= QUANT_HYST:
             return int(self.steering_command)
         return int(np.clip(round(self.steer), -STEER_LIMIT, STEER_LIMIT))
