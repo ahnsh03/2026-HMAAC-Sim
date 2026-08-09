@@ -10,7 +10,7 @@ from rclpy.qos import QoSDurabilityPolicy
 from rclpy.qos import QoSReliabilityPolicy
 
 from std_msgs.msg import String, Bool
-from std_msgs.msg import Float32MultiArray
+from std_msgs.msg import Float32, Float32MultiArray
 from interfaces_pkg.msg import PathPlanningResult, DetectionArray, MotionCommand
 
 #---------------Variable Setting---------------
@@ -19,6 +19,7 @@ SUB_PATH_TOPIC_NAME = "path_planning_result"
 SUB_TRAFFIC_LIGHT_TOPIC_NAME = "yolov8_traffic_light_info"
 SUB_LIDAR_OBSTACLE_TOPIC_NAME = "lidar_obstacle_info"
 PUB_TOPIC_NAME = "topic_control_signal"
+PUB_STEER_TOPIC_NAME = "steering_angle"   # 연속 조향각 [rad]
 
 #----------------------------------------------
 
@@ -58,7 +59,6 @@ K_LD = 0.70
 LD_BASE = 3.75
 LD_MIN = 4.85            # BEV 맨 아랫줄(4.74m)까지 쓸 수 있도록 낮춘다
 LD_MAX = 6.40
-KAPPA_REF = 0.035        # 이 곡률(반경 29m)에서 주시거리 단축이 절반쯤 걸린다
 
 # 조향은 두 몫으로 나눈다.
 #   앞먹임 = atan(축간거리 * 곡률).  곡선을 도는 데 필요한 몫. 곡률을 시간적으로
@@ -69,10 +69,6 @@ KAPPA_REF = 0.035        # 이 곡률(반경 29m)에서 주시거리 단축이 �
 # 행별 정확도를 실측해 보니 가까운 행일수록 정확했다 (차를 진짜 차로 중앙에
 # 놓고 측정: y470 -0.10m, y390 -0.16m, y260 -0.15m, y100 -0.33m, y20 -0.54m).
 # 그래서 되먹임은 가까운 행에서 읽는다.
-S_ERR = 5.00             # 횡오차를 읽는 전방거리 [m]. BEV 최근접(4.74m) 바로 위
-K_E = 1.10               # 횡오차 이득. Stanley 형태 atan(K_E * e / v)
-V_REF_MIN = 1.2          # 위 식에서 속도 하한 [m/s]
-E_LIMIT = 1.2            # 횡오차 제한 [m]. 인지가 튀어도 급조향하지 않도록
 
 # 곡률 추정. 경로가 흔들리면 곡률은 더 크게 흔들리므로 세게 눌러준다.
 KAPPA_LPF = 0.30         # 프레임 간 저역통과 계수 (29Hz 에서 시정수 약 0.14초).
@@ -122,17 +118,15 @@ STEER_GAIN = 1.00
 # GT 곡률로 만든 이상 조향과 견줘 보니, 실제 조향은 1.0초 늦고 방향 반전이
 # 3.1배 많았다 (297회 -> 925회). 지연과 진동이 함께 있다는 뜻이라, 여러 곳에
 # 흩어져 있던 저역통과를 걷어내고 한 곳으로 모았다.
-# 0.45 면 10Hz 에서 시정수 약 0.19초.
-TARGET_LPF = 0.45
+# 0.28 이면 10Hz 에서 시정수 약 0.31초.
+# 연속 조향으로 바꾼 뒤 정수화 사각지대가 없어져 더 세게 걸 수 있게 됐다.
+# 0.45 -> 0.28 로 조향 표본간 변화 0.573 -> 0.446칸, 방향반전 331 -> 206회.
+# 0.18 까지 낮추면 더 부드럽지만 지연이 커져 바깥 실선을 밟는다 (4.8 -> 10.4%).
+TARGET_LPF = 0.28
 
-STEER_RATE_LIMIT = 3.0   # 한 tick(TIMER) 당 조향 변화량 상한 [step].
+STEER_RATE_LIMIT = 2.2   # 한 tick(TIMER) 당 조향 변화량 상한 [step].
                          # 평활은 TARGET_LPF 가 하므로, 여기서는 한 프레임짜리
                          # 오검출이 그대로 넘어가지 않게 막는 정도만 한다.
-SIGMA_DELTA = True       # 정수 조향의 성긴 단차를 시간평균으로 메운다
-QUANT_HYST = 0.30        # 정수 조향을 바꾸는 문턱 [step]. 0 이면 그냥 반올림인데,
-                         # 연속값이 두 칸 경계 근처면 매 tick 칸을 오가며 직선에서도
-                         # 조향이 꿈틀거린다. 크게 잡으면 사각지대가 되어 한쪽으로
-                         # 밀린 채 안 돌아오므로 0.3 정도만 준다.
 
 #---------------속도---------------
 # 속도 명령은 0~255 이고 v[m/s] = speed / 51 이다 (MAX_SPEED=5 기준).
@@ -205,6 +199,7 @@ class MotionPlanningNode(Node):
         self.steer_gain = self.declare_parameter('steer_gain', STEER_GAIN).value
         self.kappa_lpf = self.declare_parameter('kappa_lpf', KAPPA_LPF).value
         self.steer_rate_limit = self.declare_parameter('steer_rate_limit', STEER_RATE_LIMIT).value
+        self.target_lpf = self.declare_parameter('target_lpf', TARGET_LPF).value
         self.lane_timeout = self.declare_parameter('lane_timeout', LANE_TIMEOUT).value
 
         # QoS 설정
@@ -244,6 +239,11 @@ class MotionPlanningNode(Node):
 
         # 퍼블리셔 설정
         self.publisher = self.create_publisher(MotionCommand, self.pub_topic, self.qos_profile)
+        # 시뮬레이션에서는 조향을 연속값으로 줄 수 있다. 실차(오프라인 실습)는
+        # 아두이노가 -7..7 정수만 받으므로 MotionCommand 경로도 그대로 둔다.
+        # simulation_sender 가 이 토픽이 있으면 우선 쓰고, 없으면 정수 경로를 쓴다.
+        self.steer_pub = self.create_publisher(Float32, PUB_STEER_TOPIC_NAME, self.qos_profile)
+
         # 진단용: [주시거리 m, 그 지점 횡방향 m, 곡률 1/m, 목표조향 step, 실제조향 step]
         self.debug_pub = self.create_publisher(Float32MultiArray, 'control_debug', self.qos_profile)
 
@@ -375,7 +375,7 @@ class MotionPlanningNode(Node):
         self.lat_err = e
 
         # 평활은 여기 한 곳에서만 한다. 저역통과 뒤에 변화량 상한을 건다.
-        self.steer_lpf += TARGET_LPF * (target_steer - self.steer_lpf)
+        self.steer_lpf += self.target_lpf * (target_steer - self.steer_lpf)
         step = float(np.clip(self.steer_lpf - self.steer,
                              -self.steer_rate_limit, self.steer_rate_limit))
         self.steer += step
@@ -428,6 +428,13 @@ class MotionPlanningNode(Node):
         motion_command_msg.left_speed = int(self.left_speed_command)
         motion_command_msg.right_speed = int(self.right_speed_command)
         self.publisher.publish(motion_command_msg)
+
+        # 연속 조향각. 정수화로 잃는 5.29도 해상도를 그대로 살린다.
+        # 속도 명령이 0 이면 조향도 0 으로 보내 정지 상태를 흐리지 않는다.
+        angle = Float32()
+        angle.data = float(np.clip(self.steer, -STEER_LIMIT, STEER_LIMIT) * RAD_PER_STEP
+                           if self.left_speed_command != 0 else 0.0)
+        self.steer_pub.publish(angle)
 
         if self.debug is not None:
             dbg = Float32MultiArray()
@@ -492,28 +499,20 @@ class MotionPlanningNode(Node):
     def quantize_steer(self):
         """연속 조향을 정수 -7..7 로 만든다.
 
-        한 칸이 5.29도로 성기다. 반경으로 치면 2칸이 15.3m, 3칸이 10.1m 라
-        그 사이 값을 낼 수 없어 구간별 단차가 크다.
+        시뮬레이션은 `steering_angle` 토픽으로 연속 조향각을 따로 받으므로
+        이 정수값을 쓰지 않는다. 실차(오프라인 실습)의 아두이노가 정수만 받기에
+        MotionCommand 경로를 그대로 유지한다.
 
-        SIGMA_DELTA 를 켜면 정수화하며 버린 몫을 다음 tick 으로 넘겨서
-        (1차 잡음성형) 조향의 시간평균이 연속값과 같아진다. 2.5칸이 필요하면
+        한 칸이 5.29도로 성기므로, 정수화하며 버린 몫을 다음 tick 으로 넘겨
+        (1차 잡음성형) 시간평균이 연속값과 같아지게 한다. 2.5칸이 필요하면
         3,2,3,2 를 번갈아 내보내는 식이다. 한 tick 에 한 칸까지만 움직이도록
         묶어 눈에 띄는 튐은 막는다.
-
-        끄면 히스테리시스 방식이다. 지금 칸에서 QUANT_HYST 이상 벗어날 때만
-        칸을 바꾼다. 떨림은 없지만 그만큼 사각지대가 생긴다.
         """
-        if SIGMA_DELTA:
-            acc = self.steer + self.quant_err
-            raw = int(np.clip(round(acc), -STEER_LIMIT, STEER_LIMIT))
-            raw = int(np.clip(raw, self.steering_command - 1, self.steering_command + 1))
-            self.quant_err = float(np.clip(acc - raw, -1.0, 1.0))
-            return raw
-
-        if abs(self.steer - self.steering_command) <= QUANT_HYST:
-            return int(self.steering_command)
-        return int(np.clip(round(self.steer), -STEER_LIMIT, STEER_LIMIT))
-
+        acc = self.steer + self.quant_err
+        raw = int(np.clip(round(acc), -STEER_LIMIT, STEER_LIMIT))
+        raw = int(np.clip(raw, self.steering_command - 1, self.steering_command + 1))
+        self.quant_err = float(np.clip(acc - raw, -1.0, 1.0))
+        return raw
 
 def main(args=None):
     rclpy.init(args=args)

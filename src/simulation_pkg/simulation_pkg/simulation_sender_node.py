@@ -4,7 +4,7 @@ from rclpy.qos import QoSProfile
 from rclpy.qos import QoSHistoryPolicy
 from rclpy.qos import QoSDurabilityPolicy
 from rclpy.qos import QoSReliabilityPolicy
-from std_msgs.msg import String
+from std_msgs.msg import Float32, String
 from geometry_msgs.msg import Twist
 from interfaces_pkg.msg import MotionCommand
 
@@ -16,6 +16,13 @@ from simulation_pkg.config import SimulationSenderSettings as set
 
 SUB_TOPIC_NAME = set.MOTION_PLANNER_TOPIC 
 PUB_TOPIC_NAME = set.GAZEBO_CONTROL_TOPIC
+
+# 시뮬레이션에서는 조향을 연속값으로 줄 수 있다.
+# MotionCommand.steering 은 int32 -7..7 이라 한 칸이 5.29도로 성기고, 그 단차가
+# 그대로 조향 떨림이 된다. 실차(오프라인 실습)는 아두이노가 정수만 받으므로
+# 그 경로는 그대로 두고, 이 토픽이 올 때만 연속값을 쓴다.
+SUB_STEER_TOPIC_NAME = "steering_angle"
+STEER_ANGLE_TIMEOUT = 0.5   # 이 시간 이상 연속 조향이 없으면 정수 경로로 되돌아간다 [s]
 
 STEER = set.STEERING
 DIRECT = set.DIRECTION
@@ -97,17 +104,37 @@ class MotorControlNode(Node):
     
     self.simul = SendSignal()
     self.subscription = self.create_subscription(MotionCommand, self.sub_topic, self.data_callback, qos_profile)
+    self.steer_angle = None
+    self.steer_stamp = 0.0
+    self.create_subscription(Float32, SUB_STEER_TOPIC_NAME, self.steer_angle_callback, qos_profile)
     
     self.publisher = self.create_publisher(Twist, self.pub_topic, qos_profile)
     self.timer = self.create_timer(0.1, self.send_cmd_vel)
     self.velocity = Twist()
     
+  def steer_angle_callback(self, msg: Float32):
+    self.steer_angle = float(msg.data)
+    self.steer_stamp = self.get_clock().now().nanoseconds * 1e-9
+
+  def fresh_steer_angle(self):
+    """최근에 받은 연속 조향각. 없거나 오래됐으면 None."""
+    if self.steer_angle is None:
+      return None
+    if self.get_clock().now().nanoseconds * 1e-9 - self.steer_stamp > STEER_ANGLE_TIMEOUT:
+      return None
+    return self.steer_angle
+
   def send_cmd_vel(self):
     self.publisher.publish(self.velocity)
 
   def data_callback(self, motor):
     angle, left, right = self.simul.process(motor)
-        
+
+    # 연속 조향각이 오고 있으면 그쪽을 쓴다. 부호 규약(STEER)은 동일하게 적용한다.
+    continuous = self.fresh_steer_angle()
+    if continuous is not None:
+      angle = STEER * continuous
+
     self.velocity.angular.z = float(angle)
     self.velocity.linear.x = float(left)
   

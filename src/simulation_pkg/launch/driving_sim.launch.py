@@ -69,6 +69,8 @@ def generate_launch_description():
                               description='오차 되먹임 점진이득 문턱 [m]. 작을수록 민감'),
         DeclareLaunchArgument('kappa_lpf', default_value='0.30',
                               description='곡률 저역통과 계수. 클수록 빠르고 노이지'),
+        DeclareLaunchArgument('target_lpf', default_value='0.28',
+                              description='최종 조향 저역통과 계수. 작을수록 부드럽고 느리다'),
         DeclareLaunchArgument('steer_rate_limit', default_value='2.2',
                               description='tick 당 조향 변화 상한 [step]'),
         DeclareLaunchArgument('lane_width', default_value='328.0',
@@ -144,7 +146,8 @@ def generate_launch_description():
                          'k_offtrack': arg('k_offtrack', float),
                          'e_soft': arg('e_soft', float),
                          'kappa_lpf': arg('kappa_lpf', float),
-                         'steer_rate_limit': arg('steer_rate_limit', float)}]
+                         'steer_rate_limit': arg('steer_rate_limit', float),
+                         'target_lpf': arg('target_lpf', float)}]
         ),
        
         Node(

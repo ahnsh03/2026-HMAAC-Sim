@@ -63,14 +63,11 @@ SMOOTH_ALPHA_WEAK = 0.20
 # 어떤 행의 추정이 잠깐 비면 직전 값을 이만큼 유지한다 [s].
 # 인지가 어려운 구간에서 유효한 행이 2개로 줄면 경로가 직선이 되어 곡률을 잃는데,
 # 그게 오히려 차로 이탈을 키운다. 29Hz 이므로 0.3초는 약 9프레임이다.
-HOLD_SEC = 0.0
 
 # 한 프레임 안에서 행끼리 얼마나 어긋나도 되는지 [px].
 # 차로 중심은 거리에 대해 매끄러운 곡선이라, 한 행만 크게 튀면 그 행이 틀린 것이다.
 # 12지점에서 재보니 행별 편향은 ±7px 로 없는데 표준편차가 70~100px 였다.
 # 즉 문제는 치우침이 아니라 일관성이라, 프레임 안에서 튀는 행을 걸러낸다.
-INFRAME_MAX_RESIDUAL = 60
-INFRAME_MIN_KEEP = 3       # 이보다 적게 남으면 걸러내지 않는다
 
 # 이 개수 미만이면 경로를 만들 수 없으므로 아예 발행하지 않는다
 # (motion_planner 가 경로 끊김으로 판단해 감속한다)
@@ -133,7 +130,6 @@ class Yolov8InfoExtractor(Node):
 
         centers = self.reject_frame_jumps(centers)
         centers = self.smooth(centers)
-        centers = self.hold_missing(centers)
 
         if len(centers) < MIN_VALID_POINTS:
             self.miss_count += 1
@@ -187,46 +183,12 @@ class Yolov8InfoExtractor(Node):
         # y 는 아래로 증가하므로 (near - far) 가 전방 거리에 해당한다
         return float(np.degrees(np.arctan2(centers[far] - centers[near], near - far)))
 
-    @staticmethod
-    def reject_inframe_outliers(centers):
-        """한 프레임 안에서 다른 행들과 어긋나는 행을 버린다.
-
-        차로 중심은 거리에 대해 매끄럽다. 행들에 2차식을 맞춰보고 크게 벗어난
-        행은 옆 차로나 갈라지는 도로를 물었다고 본다.
-        """
-        if len(centers) < 4:
-            return centers
-        ys = np.array(sorted(centers), dtype=float)
-        xs = np.array([centers[y] for y in ys], dtype=float)
-        deg = 2 if len(ys) >= 5 else 1
-        coeff = np.polyfit(ys, xs, deg)
-        residual = np.abs(np.polyval(coeff, ys) - xs)
-        # 잔차가 큰 것부터 하나씩 떨궈본다
-        keep = residual <= INFRAME_MAX_RESIDUAL
-        if keep.sum() < INFRAME_MIN_KEEP:
-            return centers
-        return {int(y): centers[y] for y, k in zip(ys, keep) if k}
-
     def reject_frame_jumps(self, centers):
         """직전 프레임 대비 물리적으로 불가능한 이동은 오검출로 보고 버린다."""
         if not self.prev_centers or self.now_sec() - self.prev_stamp > PREV_VALID_SEC:
             return centers
         return {y: x for y, x in centers.items()
                 if y not in self.prev_centers or abs(x - self.prev_centers[y]) <= MAX_FRAME_JUMP}
-
-    def hold_missing(self, centers):
-        """방금 추정하지 못한 행을 직전 값으로 잠깐 메운다.
-
-        곡률을 살리려면 경로에 점이 3개는 있어야 한다. 한두 행이 잠깐 비었다고
-        경로를 통째로 버리면 차가 인지 공백 구간에서 멈춰 버리고, 멈추면 시야가
-        그대로라 회복하지도 못한다.
-        """
-        if (HOLD_SEC <= 0.0 or not self.prev_centers
-                or self.now_sec() - self.prev_stamp > HOLD_SEC):
-            return centers
-        out = dict(self.prev_centers)
-        out.update(centers)
-        return out
 
     def smooth(self, centers):
         """프레임 간 평활. 한 프레임짜리 흔들림이 그대로 조향으로 가지 않게 한다.

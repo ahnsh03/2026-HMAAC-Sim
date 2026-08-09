@@ -23,6 +23,7 @@
 """
 
 import csv
+import math
 import os
 import sys
 
@@ -114,6 +115,21 @@ def main():
         stat("총 오차", total[sel])
         stat("인지 오차", percep[sel])
         stat("제어 오차", control[sel])
+
+    # 곡률 추정 품질. 직선에서는 0 이어야 한다.
+    # 곡률은 앞먹임 atan(축간거리*곡률) 로 조향에 그대로 들어가므로,
+    # 여기서의 편향은 상시 조향 편향이 되고 산포는 조향 흔들림이 된다.
+    kap_est = np.array([float(r["kappa"]) if r["kappa"] != "nan" else np.nan for r in rows])
+    ks = kap_est[straight]
+    ks = ks[np.isfinite(ks)]
+    if len(ks):
+        print("\n[곡률 추정 품질] 직선 구간 %d개 (참값 0)" % len(ks))
+        print("  평균 %+.4f 1/m  ->  상시 조향 %+.2f step"
+              % (ks.mean(), math.atan(2.86 * ks.mean()) / (0.6458 / 7)))
+        print("  표준편차 %.4f 1/m  ->  조향 흔들림 ±%.2f step"
+              % (ks.std(), math.atan(2.86 * ks.std()) / (0.6458 / 7)))
+        print("  상한 도달 %.1f%%  (|곡률| > 0.10, 이 트랙 실제 최대 곡률)"
+              % (100 * (np.abs(ks) > 0.10).mean()))
 
     _, d_out, d_in = lane_gt.evaluate(x, y, gt)
     print("\n점선 밟음 %.1f%%  (차체가 점선에 닿음, 차폭 %.2fm 반영)"
