@@ -59,6 +59,8 @@ def generate_launch_description():
                               description='코너 최저 속도 [m/s]'),
         DeclareLaunchArgument('steer_gain', default_value='1.00',
                               description='조향 배수. 1.0 이 기하학적으로 필요한 값'),
+        DeclareLaunchArgument('k_ff_deficit', default_value='1.0',
+                              description='곡률 앞먹임으로 조향 부족분을 메우는 비율'),
         DeclareLaunchArgument('k_cut_comp', default_value='0.0',
                               description='코너 파고듦 보정 배수'),
         DeclareLaunchArgument('e_soft', default_value='0.0',
@@ -136,6 +138,7 @@ def generate_launch_description():
                          'v_min': arg('v_min', float),
                          'steer_gain': arg('steer_gain', float),
                          'k_cut_comp': arg('k_cut_comp', float),
+                         'k_ff_deficit': arg('k_ff_deficit', float),
                          'e_soft': arg('e_soft', float),
                          'kappa_lpf': arg('kappa_lpf', float),
                          'steer_rate_limit': arg('steer_rate_limit', float)}]

@@ -77,8 +77,19 @@ KAPPA_LIMIT = 0.13       # 곡률 상한 [1/m] (반경 7.7m).
                          # 예전 값 0.30 은 반경 3.3m 로, 노이즈를 그대로 통과시켰다.
 
 # 순수추종의 코너 파고듦 보정 계수. 1.0 이면 기하학적 보정량(kappa*Ld^2/8) 그대로.
-# 0 = 보정 없음(순수추종 그대로). 원인을 먼저 가리기 위해 기본은 0 에서 시작한다.
+# 0 = 보정 없음(순수추종 그대로).
 K_CUT_COMP = 0.0
+
+# 곡률이 큰 구간에서 순수추종이 내는 조향의 부족분을 앞먹임으로 메우는 비율.
+#
+# 순수추종은 원호 위에서는 정확하지만, 코너 반경이 전방 주시거리보다 짧아지면
+# 그 거리의 차로 중심이 아예 존재하지 않는다. 반경 4.5m 코너에서 전방 4.85m 는
+# 원이 닿지 못하는 거리다 (원은 앞으로 최대 R 까지만 간다). 그러면 경로가 짧게
+# 끊기고 조향이 필요량에 못 미쳐 코너 탈출에서 바깥으로 밀린다.
+#
+# 그래서 곡률로 계산한 정상선회 조향 atan(축간거리*곡률) 을 하한으로 깐다.
+# 순수추종이 이미 그만큼 내고 있으면 아무 일도 하지 않는다.
+K_FF_DEFICIT = 1.0
 
 # 오차 되먹임의 점진 이득 문턱 [m]. 이 크기 오차에서 이득의 절반이 걸린다.
 # 0 이면 점진 이득을 쓰지 않고 그대로 반응한다(사각지대 없음).
@@ -157,6 +168,7 @@ class MotionPlanningNode(Node):
         self.k_ld = self.declare_parameter('k_ld', K_LD).value
         self.ld_base = self.declare_parameter('ld_base', LD_BASE).value
         self.k_cut_comp = self.declare_parameter('k_cut_comp', K_CUT_COMP).value
+        self.k_ff_deficit = self.declare_parameter('k_ff_deficit', K_FF_DEFICIT).value
         self.e_soft = self.declare_parameter('e_soft', E_SOFT).value
         self.steer_gain = self.declare_parameter('steer_gain', STEER_GAIN).value
         self.kappa_lpf = self.declare_parameter('kappa_lpf', KAPPA_LPF).value
@@ -239,11 +251,15 @@ class MotionPlanningNode(Node):
         return row_to_ahead(row), (x - CAR_CENTER_X) / PX_PER_M_LAT
 
     def update_curvature(self):
-        """경로의 곡률 [1/m]. 오른쪽으로 휘면 양수.
+        """차량 바로 앞 지점의 경로 곡률 [1/m]. 오른쪽으로 휘면 양수.
 
         측정 구간(4.7~9.6m) 안에서만 2차식으로 맞춘다. 밖으로 외삽하면 값이 크게
         튀어 조향이 발산한다. 곡률은 길의 성질이라 천천히 변하므로, 프레임 간
-        저역통과로 노이즈를 충분히 눌러도 늦지 않는다.
+        저역통과로 노이즈를 눌러도 늦지 않는다.
+
+        차량 바로 앞의 국소 곡률을 쓰려고 3차식으로 맞춰 가장 가까운 지점에서
+        읽어도 봤는데, 짧은 경로에서 3차 맞춤이 노이즈에 약해 오히려 나빴다
+        (랩타임 68.2 -> 70.5초, 90분위 오차 0.85 -> 0.93m). 2차식 평균이 낫다.
         """
         s = row_to_ahead(self.path_y)
         d = (self.path_x - CAR_CENTER_X) / PX_PER_M_LAT
@@ -282,6 +298,14 @@ class MotionPlanningNode(Node):
         lat_aim = lat_curve + self.soft_gain(lat_err) + self.k_cut_comp * kappa * dist * dist / 8.0
 
         delta = math.atan2(2.0 * WHEELBASE * lat_aim, dist * dist + lat_aim * lat_aim)
+
+        # 곡률이 큰 구간에서 순수추종이 모자란 만큼만 채운다. 부호는 곡률을 따른다.
+        delta_ff = math.atan(WHEELBASE * kappa)
+        if delta_ff * delta >= 0.0:
+            deficit = abs(delta_ff) - abs(delta)
+            if deficit > 0.0:
+                delta += math.copysign(self.k_ff_deficit * deficit, delta_ff)
+
         target_steer = float(np.clip(self.steer_gain * delta / RAD_PER_STEP,
                                      -STEER_LIMIT, STEER_LIMIT))
         e = lat_err
