@@ -51,14 +51,30 @@ RAD_PER_STEP = MAX_STEER_RAD / STEER_LIMIT
 # 길게 잡을수록 부드럽지만 코너를 덜 꺾는다.
 K_LD = 0.70
 LD_BASE = 3.75
-LD_MIN = 5.35
+LD_MIN = 4.85            # BEV 맨 아랫줄(4.74m)까지 쓸 수 있도록 낮춘다
 LD_MAX = 6.40
+
+# 조향은 두 몫으로 나눈다.
+#   앞먹임 = atan(축간거리 * 곡률).  곡선을 도는 데 필요한 몫. 곡률을 시간적으로
+#            평활하므로, 일정한 곡선에서는 조향도 일정하게 유지된다.
+#   되먹임 = 가까운 지점의 '진짜 횡오차'.  그 지점의 차로 중심에서 곡률 때문에
+#            생기는 몫(kappa*s^2/2)을 빼면 남는 것이 실제 이탈량이다.
+#
+# 행별 정확도를 실측해 보니 가까운 행일수록 정확했다 (차를 진짜 차로 중앙에
+# 놓고 측정: y470 -0.10m, y390 -0.16m, y260 -0.15m, y100 -0.33m, y20 -0.54m).
+# 그래서 되먹임은 가까운 행에서 읽는다.
+S_ERR = 5.00             # 횡오차를 읽는 전방거리 [m]. BEV 최근접(4.74m) 바로 위
+K_E = 1.10               # 횡오차 이득. Stanley 형태 atan(K_E * e / v)
+V_REF_MIN = 1.2          # 위 식에서 속도 하한 [m/s]
+E_LIMIT = 1.2            # 횡오차 제한 [m]. 인지가 튀어도 급조향하지 않도록
 
 # 곡률 추정. 경로가 흔들리면 곡률은 더 크게 흔들리므로 세게 눌러준다.
 KAPPA_LPF = 0.30         # 프레임 간 저역통과 계수 (29Hz 에서 시정수 약 0.14초).
                          # 너무 느리면 조향은 미리 꺾이는데 바깥보정이 늦게 들어와
                          # 코너 진입에서 안쪽으로 파고든다.
-KAPPA_LIMIT = 0.30       # 곡률 상한 [1/m] (반경 3.3m). 이보다 급한 길은 없다
+KAPPA_LIMIT = 0.13       # 곡률 상한 [1/m] (반경 7.7m).
+                         # GT 경로에서 잰 이 트랙의 최대 곡률이 약 0.10 이다.
+                         # 예전 값 0.30 은 반경 3.3m 로, 노이즈를 그대로 통과시켰다.
 
 # 순수추종의 코너 파고듦 보정 계수. 1.0 이면 기하학적 보정량(kappa*Ld^2/8) 그대로.
 # 0 = 보정 없음(순수추종 그대로). 원인을 먼저 가리기 위해 기본은 0 에서 시작한다.
@@ -79,20 +95,24 @@ QUANT_HYST = 0.0         # 정수 조향을 바꾸는 문턱 [step]. 0 이면 �
 #---------------속도---------------
 # 속도 명령은 0~255 이고 v[m/s] = speed / 51 이다 (MAX_SPEED=5 기준).
 CMD_PER_MPS = 51.0
-V_MAX = 2.50             # 직선 최고 속도 [m/s]
+V_MAX = 2.40             # 직선 최고 속도 [m/s]
 V_MIN = 1.40             # 코너 최저 속도 [m/s]
 ACCEL_LIMIT = 1.6        # 가속 상한 [m/s^2]
 DECEL_LIMIT = 2.2        # 감속 상한 [m/s^2]. 코너 앞에서 급하게 줄이지 않도록
 SPEED_LPF = 0.5          # 속도 1차 저역통과 계수 (1 이면 평활 없음)
 
 # 감속 기준 1: 횡가속도. v = sqrt(a * R) 이므로 반경 R 인 코너의 상한이 정해진다.
-# 이 트랙의 코너는 R이 10~15m 라 이것만으로는 거의 감속하지 않는다.
+# GT 차로 중앙선에서 곡률을 재보니 (tools/speed_profile.py) 이 트랙의 최소 반경은
+# 4.5m, 90분위는 9.3m 다. 횡가속 3.0 기준이면 R=4.5m 에서도 3.7m/s 까지 되므로
+# 2.4m/s 로 달리는 한 이 기준으로는 감속할 일이 없다.
+# 실제 제약은 횡가속도가 아니라 조향 각도(아래)와 인지 지연이다.
 A_LAT_MAX = 3.5          # 허용 횡가속도 [m/s^2]
 
 # 감속 기준 2: 조향 여유. 조향이 포화에 가까우면 더 꺾을 수 없으므로 속도를 줄인다.
 # STEER_FREE 이하에서는 아예 감속하지 않는다 (완만한 곡선에서 괜히 느려지지 않게).
-STEER_FREE = 4.5         # 이 조향까지는 전속 [step]. 이 트랙 코너는 3칸 안팎이라
-                         # 사실상 감속하지 않는다. 정말 급한 곳에서만 줄인다.
+# 감속 기준 2: 조향 여유. 최소 반경 4.5m 코너는 조향 atan(2.86/4.5)=0.57rad,
+# 즉 6.2칸이 필요해 최대(7칸)에 거의 닿는다. 여기서는 여유가 없으므로 줄인다.
+STEER_FREE = 4.5         # 이 조향까지는 전속 [step]
 STEER_FULL = 7.0         # 이 조향이면 V_MIN [step]
 
 #---------------인지 공백 대응---------------
@@ -163,6 +183,7 @@ class MotionPlanningNode(Node):
         self.speed_mps = 0.0     # 연속값 속도 [m/s]
         self.kappa = 0.0         # 저역통과한 경로 곡률 [1/m]
         self.debug = None        # (주시거리, 횡방향, 곡률, 목표조향)
+        self.lat_err = 0.0       # 곡률 성분을 뺀 진짜 횡오차 [m]
 
         self.steering_command = 0
         self.left_speed_command = 0
@@ -243,7 +264,11 @@ class MotionPlanningNode(Node):
         return err * abs(err) / (abs(err) + self.e_soft)
 
     def follow_lane(self):
-        """순수추종으로 조향을 만들고, 곡률 앞먹임과 오차 되먹임을 분리해서 쓴다."""
+        """곡률 앞먹임 + 가까운 지점의 횡오차 되먹임.
+
+        코너에서 조향이 들쭉날쭉하지 않고 곡률에 맞는 값으로 유지되도록,
+        조향의 큰 몫은 시간적으로 평활한 곡률에서 만든다.
+        """
         kappa = self.update_curvature()
 
         # 속도가 붙을수록 멀리 본다. 흔들림을 줄이고 코너 진입을 부드럽게 한다.
@@ -251,20 +276,17 @@ class MotionPlanningNode(Node):
         dist, lat = self.path_point(lookahead)
 
         # 곡선을 정확히 따라가고 있어도 전방 주시점의 차로 중심은 옆에 있다.
-        # 그 몫(앞먹임)과 진짜 오차(되먹임)를 나눠서, 앞먹임은 그대로 쓰고
-        # 되먹임에만 점진 이득을 건다. 작은 흔들림에 조향이 튀지 않게 하는 핵심.
+        # 그 몫과 진짜 오차를 나눠, 되먹임에만 점진 이득을 건다.
         lat_curve = kappa * dist * dist / 2.0
         lat_err = lat - lat_curve
-
-        # 순수추종은 전방 한 점을 직선으로 겨냥하므로, 곡선에서는 그 현(弦)이 실제
-        # 길보다 안쪽을 지나 매 코너마다 안쪽으로 파고든다. 그 양이 약 kappa*Ld^2/8
-        # 이므로 조준점을 그만큼 바깥으로 민다.
         lat_aim = lat_curve + self.soft_gain(lat_err) + self.k_cut_comp * kappa * dist * dist / 8.0
 
         delta = math.atan2(2.0 * WHEELBASE * lat_aim, dist * dist + lat_aim * lat_aim)
         target_steer = float(np.clip(self.steer_gain * delta / RAD_PER_STEP,
                                      -STEER_LIMIT, STEER_LIMIT))
+        e = lat_err
         self.debug = (dist, lat, kappa, target_steer)
+        self.lat_err = e
 
         # 급격한 조향 변화는 차체를 흔들고 타이어를 미끄러뜨린다
         step = float(np.clip(target_steer - self.steer, -self.steer_rate_limit, self.steer_rate_limit))

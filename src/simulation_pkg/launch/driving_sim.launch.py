@@ -53,7 +53,7 @@ def generate_launch_description():
                               description='YOLO confidence 임계값'),
         DeclareLaunchArgument('center_offset', default_value='0.0',
                               description='차로 중심 보정 [BEV 픽셀, 약 103px=1m]. 양수면 오른쪽'),
-        DeclareLaunchArgument('v_max', default_value='2.5',
+        DeclareLaunchArgument('v_max', default_value='2.4',
                               description='직선 최고 속도 [m/s]'),
         DeclareLaunchArgument('v_min', default_value='1.4',
                               description='코너 최저 속도 [m/s]'),

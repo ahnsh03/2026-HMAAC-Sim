@@ -31,8 +31,12 @@ SHOW_IMAGE = False
 SRC_MAT = [[238, 316], [402, 313], [501, 476], [155, 476]]
 
 # 차로 중심을 뽑을 BEV 행. y 가 클수록 차량에 가깝다.
-# 세로 480px 이 약 4.9m 에 해당하므로 y=420 이 약 4.2m, y=20 이 약 8.3m 앞이다.
-TARGET_POINT_YS = (20, 100, 180, 260, 340, 420)
+# 세로 480px 이 약 4.9m 에 해당하므로 y=470 이 약 4.8m, y=20 이 약 8.3m 앞이다.
+#
+# 아래쪽(가까운) 행을 반드시 포함해야 한다. 트랙 좌측의 급코너에서는 길이 카메라
+# 화각을 벗어나 먼 행에는 아무것도 안 잡히고, 차선 정보가 화면 맨 아래에만 남는다.
+# 예전에는 420 까지만 봐서 그 구간에서 인지가 통째로 비었다.
+TARGET_POINT_YS = (20, 100, 180, 260, 330, 390, 435, 470)
 
 # 차로 중심을 오른쪽으로 이 만큼 민다 [BEV 픽셀, 약 103px = 1m]. 양수 = 오른쪽.
 # 좌우 쏠림이 남으면 이 값만 조정하면 된다.
@@ -50,11 +54,15 @@ MAX_CONSECUTIVE_MISS = 3   # 연속 실패가 이만큼이면 기준을 버리�
 # 프레임 간 평활 계수. 1.0 이면 평활 없음.
 # 29Hz 에서 0.4 면 시정수가 약 85ms 라, 튐은 줄이면서 지연은 거의 안 생긴다.
 SMOOTH_ALPHA = 0.4
+# 좌우 경계를 둘 다 본 게 아니라 한쪽만 보고 차로 폭을 더해 만든 값은 덜 믿는다.
+# S자 구간처럼 바깥 실선이 화각을 벗어나 점선만 남으면 추정이 흔들리는데,
+# 이때 더 세게 눌러야 조향이 따라 흔들리지 않는다.
+SMOOTH_ALPHA_WEAK = 0.20
 
 # 어떤 행의 추정이 잠깐 비면 직전 값을 이만큼 유지한다 [s].
 # 인지가 어려운 구간에서 유효한 행이 2개로 줄면 경로가 직선이 되어 곡률을 잃는데,
 # 그게 오히려 차로 이탈을 키운다. 29Hz 이므로 0.3초는 약 9프레임이다.
-HOLD_SEC = 0.30
+HOLD_SEC = 0.0
 
 # 이 개수 미만이면 경로를 만들 수 없으므로 아예 발행하지 않는다
 # (motion_planner 가 경로 끊김으로 판단해 감속한다)
@@ -95,6 +103,7 @@ class Yolov8InfoExtractor(Node):
         self.prev_centers = {}
         self.prev_stamp = 0.0
         self.miss_count = 0
+        self.sources = {}
 
         self.get_logger().info(
             f"차로 중심 추정: center_line 기준, lane_width={self.lane_width:.0f}px, "
@@ -106,6 +115,7 @@ class Yolov8InfoExtractor(Node):
 
         try:
             centers, debug = self.estimator.estimate(detection_msg.detections, TARGET_POINT_YS)
+            self.sources = debug['sources']
         except Exception as exc:  # 한 프레임이 이상해도 노드가 죽으면 안 된다
             self.get_logger().error(f"차로 추정 실패: {exc}", throttle_duration_sec=2.0)
             return
@@ -172,7 +182,8 @@ class Yolov8InfoExtractor(Node):
         경로를 통째로 버리면 차가 인지 공백 구간에서 멈춰 버리고, 멈추면 시야가
         그대로라 회복하지도 못한다.
         """
-        if not self.prev_centers or self.now_sec() - self.prev_stamp > HOLD_SEC:
+        if (HOLD_SEC <= 0.0 or not self.prev_centers
+                or self.now_sec() - self.prev_stamp > HOLD_SEC):
             return centers
         out = dict(self.prev_centers)
         out.update(centers)
@@ -189,7 +200,13 @@ class Yolov8InfoExtractor(Node):
         out = {}
         for y, x in centers.items():
             prev = self.prev_centers.get(y)
-            out[y] = x if prev is None else prev + SMOOTH_ALPHA * (x - prev)
+            if prev is None:
+                out[y] = x
+                continue
+            # 근거에 '+' 가 있으면 좌우 경계를 모두 본 것이라 더 믿을 만하다
+            two_sided = '+' in str(self.sources.get(y, ''))
+            alpha = SMOOTH_ALPHA if two_sided else SMOOTH_ALPHA_WEAK
+            out[y] = prev + alpha * (x - prev)
         return out
 
     def publish_debug_image(self, detection_msg, centers):

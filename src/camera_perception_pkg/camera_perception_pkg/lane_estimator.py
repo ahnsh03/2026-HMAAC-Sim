@@ -203,7 +203,7 @@ class LaneCenterEstimator:
         # 가까운 행부터 훑으면서, 직전 행에서 찾은 중심을 다음 행의 기준으로 넘긴다.
         # 자차가 있는 차로에서 출발해 앞으로 따라가는 셈이라, 옆 차로나 갈라지는
         # 도로의 마스크를 잘못 물고 가는 일이 줄어든다.
-        centers, sources = {}, []
+        centers, sources = {}, {}
         ref_x = BEV_W / 2.0
         for row in sorted(rows, reverse=True):
             left = self.left_boundary(row, fit, lane1_bev, lane2_bev, ref_x, cl_bev)
@@ -218,7 +218,7 @@ class LaneCenterEstimator:
             x += self.center_offset
             if 0.0 <= x < BEV_W:
                 centers[row] = x
-                sources.append(src)
+                sources[row] = src
                 ref_x = x
 
         self._last = (fit, lane1_bev, lane2_bev)
