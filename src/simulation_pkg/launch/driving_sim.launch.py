@@ -57,7 +57,7 @@ def generate_launch_description():
                               description='직선 최고 속도 [m/s]'),
         DeclareLaunchArgument('v_min', default_value='1.4',
                               description='코너 최저 속도 [m/s]'),
-        DeclareLaunchArgument('steer_gain', default_value='1.15',
+        DeclareLaunchArgument('steer_gain', default_value='1.00',
                               description='조향 배수. 1.0 이 기하학적으로 필요한 값'),
         DeclareLaunchArgument('kappa_straight_on', default_value='0.045',
                               description='직진 락온 진입 곡률 문턱'),

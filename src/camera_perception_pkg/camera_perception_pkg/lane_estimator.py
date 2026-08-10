@@ -60,6 +60,7 @@ BAND_HALF = 6
 RUN_GAP = 15
 RUN_MIN_WIDTH = 40                # 이보다 좁으면 노이즈
 RUN_MAX_WIDTH_RATIO = 1.15        # 차로 폭 상한의 이 배를 넘으면 마스크가 샌 것
+EDGE_COVERAGE = 0.5               # 경계로 볼 피복률. 0.5 = 밴드의 절반이 마스크일 때
 MAX_TILT = math.radians(65)       # 기울기 보정 상한. 이보다 누우면 더 늘리지 않는다
 
 # center_line 곡선 맞춤 조건
@@ -153,7 +154,9 @@ def region_edges(bev_mask, row, ref_x=None, tilt=0.0):
     band = bev_mask[max(0, row - BAND_HALF): row + BAND_HALF, :]
     if band.size == 0:
         return None, None
-    cols = np.where(band.max(axis=0) > 0)[0]
+    # 열마다 밴드 안에서 마스크가 차지하는 비율. 극값 대신 이걸 쓴다.
+    cov = band.astype(np.float32).mean(axis=0) / 255.0
+    cols = np.where(cov > 0)[0]
     if len(cols) == 0:
         return None, None
 
@@ -177,7 +180,34 @@ def region_edges(bev_mask, row, ref_x=None, tilt=0.0):
 
     if best is None:
         return None, None
-    return best[1], best[2]
+    # 덩어리 안에서 피복률이 EDGE_COVERAGE 를 넘는 지점을 경계로 본다.
+    # 밴드 안 아무 픽셀의 최소/최대 열(극값)을 쓰면 한 픽셀만 튀어도 경계가 움직인다.
+    # 카메라에 가우시안 잡음(stddev 0.007)이 있어 YOLO 마스크 경계가 프레임마다
+    # 흔들리는데, 극값은 그 흔들림을 그대로 받는다. 피복률 교차점은 훨씬 안정적이고
+    # 선형보간으로 서브픽셀까지 얻는다.
+    a, b = int(best[1]), int(best[2])
+    return _coverage_edge(cov, a, b, True), _coverage_edge(cov, a, b, False)
+
+
+def _coverage_edge(cov, a, b, from_left):
+    """덩어리 [a, b] 안에서 피복률이 EDGE_COVERAGE 를 넘는 첫 지점 [px].
+
+    넘는 지점이 없으면(얇거나 성긴 덩어리) 덩어리 끝을 그대로 돌려준다.
+    """
+    idx = range(a, b + 1) if from_left else range(b, a - 1, -1)
+    prev = None
+    for i in idx:
+        if cov[i] >= EDGE_COVERAGE:
+            if prev is None:
+                return float(i)
+            # prev 와 i 사이에서 EDGE_COVERAGE 를 지나는 지점을 선형보간
+            denom = cov[i] - cov[prev]
+            if abs(denom) < 1e-6:
+                return float(i)
+            t = (EDGE_COVERAGE - cov[prev]) / denom
+            return float(prev + t * (i - prev))
+        prev = i
+    return float(a if from_left else b)
 
 
 class LaneCenterEstimator:
