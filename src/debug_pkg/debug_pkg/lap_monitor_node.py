@@ -79,6 +79,8 @@ class LapMonitorNode(Node):
         self.ctrl_kappa = float('nan') # 제어기가 쓴 곡률 [1/m]
         self.target_steer = float('nan')
         self.steer_cont = float('nan')
+        self.bow = float('nan')          # 경로가 휜 정도 [m]
+        self.straight = float('nan')     # 직진 락온 여부
         self.lane_err_sum = 0.0
         self.lane_err_bias = 0.0
         self.lane_err_max = 0.0
@@ -93,6 +95,7 @@ class LapMonitorNode(Node):
             'distance', 'lane_err',        # 주행거리, 전방 5m 차로중심 횡방향
             'ld', 'lat', 'kappa',          # 제어기가 본 것: 주시거리, 그 지점 횡방향, 곡률
             'target_steer', 'steer_cont',  # 제어기가 원한 조향(연속)
+            'bow', 'straight',             # 경로 활 높이[m], 직진 락온
             'steering', 'speed'])          # 실제 발행한 명령
 
         self.create_subscription(ModelStates, SUB_MODEL_STATES_TOPIC,
@@ -117,6 +120,8 @@ class LapMonitorNode(Node):
         if len(msg.data) >= 5:
             (self.ld, self.lat, self.ctrl_kappa,
              self.target_steer, self.steer_cont) = msg.data[:5]
+            if len(msg.data) >= 7:
+                self.bow, self.straight = msg.data[5:7]
 
     def path_callback(self, msg: PathPlanningResult):
         """차량 위치에서 차로 중심이 옆으로 벗어난 양 [m]. 양수면 차가 왼쪽에 있다.
@@ -170,6 +175,7 @@ class LapMonitorNode(Node):
             f"{self.distance:.2f}", f"{self.lane_err:.3f}",
             f"{self.ld:.2f}", f"{self.lat:.3f}", f"{self.ctrl_kappa:.4f}",
             f"{self.target_steer:.2f}", f"{self.steer_cont:.2f}",
+            f"{self.bow:.3f}", f"{self.straight:.0f}",
             self.steering, self.speed])
         # 직선 구간에서만 통계를 낸다. 곡선에서는 차가 중앙에 있어도 전방 지점의
         # 횡방향 값이 0 이 아니라, 섞으면 의미 없는 숫자가 된다.

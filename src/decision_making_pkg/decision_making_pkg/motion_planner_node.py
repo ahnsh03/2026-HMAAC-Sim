@@ -81,6 +81,22 @@ KAPPA_LPF = 0.30         # 프레임 간 저역통과 계수 (29Hz 에서 시정
 KAPPA_NEAR_SPAN = 2.6    # 앞먹임 곡률을 재는 구간 길이 [m]. 경로 앞쪽 절반쯤.
 KAPPA_MIN_SPAN = 1.8     # 경로가 이보다 짧으면 곡률을 갱신하지 않고 유지한다 [m]
 KAPPA_LIMIT = 0.13       # 곡률 상한 [1/m] (반경 7.7m).
+#
+# 이 곡률 추정은 길의 곡률을 재는 데 실패하고 있다. 지상진실과 대조하면
+#     직진 구간  실제 평균|k| 0.009  <-  추정 0.102
+#     코너 구간  실제 평균|k| 0.081  <-  추정 0.120
+# 즉 항상 0.10 쯤을, 항상 왼쪽으로 낸다. 그런데도 주행이 되는 것은 이 트랙이
+# 전부 좌회전인 닫힌 루프라, 그 상시 좌편향이 코너에서 필요한 조향을 공급해
+# 주기 때문이다. 대신 직선에서도 같은 크기로 나와 조향 목표를 ±2칸 흔든다.
+# 직진 흔들림의 정체가 이것이다.
+#
+# 추정을 정직하게 고쳐도 봤다 (기저 2.6 -> 4.9m, 스플라인 양끝 제거, 잔차
+# 기반 재가중과 축소). 직진 편향이 -0.085 -> +0.005 로 사라지고 조향 표본간
+# 변화도 0.741 -> 0.496 으로 좋아졌지만, 코너에 공급되던 몫이 함께 사라져
+# 바깥으로 밀렸다 (실선 밟음 2.3 -> 49%). 배수(1.3/1.45), 앞먹임 이득
+# (1.6/2.2), 큰 조향에서만 이득을 올리는 비선형 보정, 3차식 국소 곡률까지
+# 모두 시도했으나 어느 것도 지금 성적을 넘지 못했다.
+# 남은 길은 아래 update_bow 의 주석에 적었다.
                          # GT 경로에서 잰 이 트랙의 최대 곡률이 약 0.10 이다.
                          # 예전 값 0.30 은 반경 3.3m 로, 노이즈를 그대로 통과시켰다.
 
@@ -227,6 +243,7 @@ class MotionPlanningNode(Node):
         self.speed_mps = 0.0     # 연속값 속도 [m/s]
         self.kappa = 0.0         # 저역통과한 경로 곡률 [1/m]
         self.ff_deficit = 0.0    # 저역통과한 앞먹임 부족분 [rad]
+        self.bow = 0.0           # 경로가 휜 정도 [m]. 진단용
         self.quant_err = 0.0     # 정수화하며 버린 조향 (시그마-델타용)
         self.steer_lpf = 0.0     # 저역통과한 목표 조향 [step]
         self.debug = None        # (주시거리, 횡방향, 곡률, 목표조향)
@@ -317,6 +334,37 @@ class MotionPlanningNode(Node):
         self.kappa += self.kappa_lpf * (raw - self.kappa)
         return self.kappa
 
+    def update_bow(self):
+        """경로가 직선에서 얼마나 벗어났는지 [m]. 제어에는 쓰지 않고 로그로만 낸다.
+
+        곡률은 2차 미분이라 잡음에 약하니, 변위로 재면 직진을 가려낼 수 있으리라
+        기대하고 넣었다. 길이 L 을 곡률 k 로 돌면 활 높이는 k*L^2/8 이므로
+        L=4.9m 에서 코너(k=0.10)는 0.30m, 직선은 0 이어야 한다.
+
+        실측은 그렇지 않았다.
+            직진 평균 0.327m / 완만 0.370m / 코너 0.298m
+        직선에서 오히려 더 휘어 있다. 즉 맞춤 방식의 문제가 아니라, 인지가
+        만들어내는 경로 자체가 곧은 길에서 휘어 있다. 활 0.32m 는 곡률 0.107 에
+        해당해 위 곡률 추정치와 정확히 맞아떨어진다.
+
+        원인을 좁히려고 두 가지를 더 쟀다.
+          - 종/횡가속도와의 상관이 -0.02 / -0.19 였다. 서스펜션 자세 변화로
+            BEV 가 흔들리는 것이 아니다.
+          - SRC_MAT 이 좌우 비대칭이었다 (아랫변 중심 x=328 vs 윗변 320).
+            전단을 없애 대칭으로 맞춰도 활은 0.320 -> 0.315m 로 그대로였다.
+
+        그러므로 다음에 파야 할 곳은 BEV 사다리꼴이 아니라 그 위쪽, 즉 YOLO
+        마스크에서 차선 경계를 뽑는 단계다. 행이 멀어질수록 경계가 한쪽으로
+        쏠리는지 (정지 상태에서 행별로 GT 와 견주면 바로 보인다) 확인하면 된다.
+        """
+        s = row_to_ahead(self.path_y)
+        d = (self.path_x - CAR_CENTER_X) / PX_PER_M_LAT
+        if len(s) < 8 or float(s.max() - s.min()) < KAPPA_MIN_SPAN:
+            return self.bow
+        res = d - np.polyval(np.polyfit(s, d, 1), s)
+        self.bow += self.kappa_lpf * (float(np.percentile(np.abs(res), 95)) - self.bow)
+        return self.bow
+
     def soft_gain(self, err):
         """작은 오차에는 약하게, 커질수록 제 이득으로 반응한다 [m] -> [m].
 
@@ -371,7 +419,8 @@ class MotionPlanningNode(Node):
         target_steer = float(np.clip(self.steer_gain * delta / RAD_PER_STEP,
                                      -STEER_LIMIT, STEER_LIMIT))
         e = lat_err
-        self.debug = (dist, lat, kappa, target_steer)
+        self.update_bow()
+        self.debug = (dist, lat, kappa, target_steer, self.bow)
         self.lat_err = e
 
         # 평활은 여기 한 곳에서만 한다. 저역통과 뒤에 변화량 상한을 건다.
@@ -431,7 +480,8 @@ class MotionPlanningNode(Node):
 
         if self.debug is not None:
             dbg = Float32MultiArray()
-            dbg.data = [float(v) for v in self.debug] + [float(self.steer)]
+            d0 = list(self.debug)
+            dbg.data = [float(v) for v in d0[:4]] + [float(self.steer), float(d0[4])]
             self.debug_pub.publish(dbg)
 
     def update_commands(self):
