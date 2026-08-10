@@ -14,24 +14,12 @@
 
 기존 방식은 lane2 영역 외곽선의 좌우 끝 중점을 차로 중심으로 썼는데,
 교차 구간에서 lane2 마스크가 주차장 쪽으로 새면 왼쪽 끝이 x=0 까지 끌려가
-중심이 통째로 왼쪽으로 밀린다. 좌측 쏠림과 이탈의 원인이었다.
+중심이 통째로 왼쪽으로 밀린다. 좌측 쏠림과 이탈의 원인이다.
 
-여기서는 좌우 경계를 따로 추정하고 이렇게 고른다.
-
-  1. 둘 다 잡히고 간격이 차로 폭으로 말이 되면 중점. 가장 정확하다.
-     차로 폭 상수가 조금 틀려도 영향을 받지 않는다.
-  2. 하나만 믿어야 하면 바깥쪽 실선(lane2 의 오른쪽 끝)을 쓴다.
-     잔디와 맞닿은 연속선이라 점선 중앙선보다 훨씬 안정적이다.
-  3. 바깥쪽을 못 봤을 때만 중앙선에 기댄다.
-  4. 그것도 안 되면 '차가 들어 있는 차로 영역' 의 중점을 쓴다.
-     일부 구간에서 모델이 자차 차로를 lane1 으로 붙이므로 라벨을 믿지 않는다.
-
-중앙선은 점선이라 특정 행에 조각이 없을 수 있다. 조각들의 점을 모아
-x = f(y) 곡선으로 맞춰 쓰되, 맞춤이 실패하면 행 부근 점들의 중앙값으로 대신한다.
-
-프레임 사이에는 직전에 추적하던 차로 위치를 다음 탐색의 출발점으로 넘긴다.
-매번 차량 중심에서 시작하면 두 차로가 모두 후보일 때 프레임마다 다른 차로를
-물어 전방점이 2~3m 씩 튄다.
+여기서는 왼쪽 경계와 오른쪽 경계를 따로 추정하고, 둘의 간격이 차로 폭으로
+말이 될 때만 중점을 쓴다. 한쪽만 믿을 만하면 차로 폭의 절반을 더하거나 뺀다.
+center_line 은 점선이라 특정 행에 조각이 없을 수 있으므로, 조각들의 점을 모두
+모아 x = f(y) 곡선으로 맞춘 뒤 원하는 행에서 값을 읽는다.
 """
 
 import math
@@ -45,9 +33,8 @@ BEV_H = 480
 
 # 차로 폭 [BEV 픽셀].
 # 트랙 텍스처의 차선 위치를 직접 재보니 차로 폭이 3.03~3.35m 였다.
-# 텍스처 단면을 직접 재니 차선 중심 간격이 2.98m 였다 (x 103.6 px/m = 309px).
-# 선 두께 0.12m 를 뺀 실주행 폭은 2.86m 다.
-LANE_WIDTH = 309.0
+# 가로 축척 103.6 px/m 을 곱하면 314~347px 이므로 그 중간을 쓴다.
+LANE_WIDTH = 328.0
 
 # 좌우 경계를 동시에 얻었을 때, 간격이 이 범위를 벗어나면 한쪽이 오검출이다.
 LANE_WIDTH_MIN = 220.0
@@ -60,7 +47,6 @@ BAND_HALF = 6
 RUN_GAP = 15
 RUN_MIN_WIDTH = 40                # 이보다 좁으면 노이즈
 RUN_MAX_WIDTH_RATIO = 1.15        # 차로 폭 상한의 이 배를 넘으면 마스크가 샌 것
-EDGE_COVERAGE = 0.5               # 경계로 볼 피복률. 0.5 = 밴드의 절반이 마스크일 때
 MAX_TILT = math.radians(65)       # 기울기 보정 상한. 이보다 누우면 더 늘리지 않는다
 
 # center_line 곡선 맞춤 조건
@@ -154,9 +140,7 @@ def region_edges(bev_mask, row, ref_x=None, tilt=0.0):
     band = bev_mask[max(0, row - BAND_HALF): row + BAND_HALF, :]
     if band.size == 0:
         return None, None
-    # 열마다 밴드 안에서 마스크가 차지하는 비율. 극값 대신 이걸 쓴다.
-    cov = band.astype(np.float32).mean(axis=0) / 255.0
-    cols = np.where(cov > 0)[0]
+    cols = np.where(band.max(axis=0) > 0)[0]
     if len(cols) == 0:
         return None, None
 
@@ -180,34 +164,7 @@ def region_edges(bev_mask, row, ref_x=None, tilt=0.0):
 
     if best is None:
         return None, None
-    # 덩어리 안에서 피복률이 EDGE_COVERAGE 를 넘는 지점을 경계로 본다.
-    # 밴드 안 아무 픽셀의 최소/최대 열(극값)을 쓰면 한 픽셀만 튀어도 경계가 움직인다.
-    # 카메라에 가우시안 잡음(stddev 0.007)이 있어 YOLO 마스크 경계가 프레임마다
-    # 흔들리는데, 극값은 그 흔들림을 그대로 받는다. 피복률 교차점은 훨씬 안정적이고
-    # 선형보간으로 서브픽셀까지 얻는다.
-    a, b = int(best[1]), int(best[2])
-    return _coverage_edge(cov, a, b, True), _coverage_edge(cov, a, b, False)
-
-
-def _coverage_edge(cov, a, b, from_left):
-    """덩어리 [a, b] 안에서 피복률이 EDGE_COVERAGE 를 넘는 첫 지점 [px].
-
-    넘는 지점이 없으면(얇거나 성긴 덩어리) 덩어리 끝을 그대로 돌려준다.
-    """
-    idx = range(a, b + 1) if from_left else range(b, a - 1, -1)
-    prev = None
-    for i in idx:
-        if cov[i] >= EDGE_COVERAGE:
-            if prev is None:
-                return float(i)
-            # prev 와 i 사이에서 EDGE_COVERAGE 를 지나는 지점을 선형보간
-            denom = cov[i] - cov[prev]
-            if abs(denom) < 1e-6:
-                return float(i)
-            t = (EDGE_COVERAGE - cov[prev]) / denom
-            return float(prev + t * (i - prev))
-        prev = i
-    return float(a if from_left else b)
+    return best[1], best[2]
 
 
 class LaneCenterEstimator:

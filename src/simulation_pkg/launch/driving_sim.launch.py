@@ -59,14 +59,6 @@ def generate_launch_description():
                               description='코너 최저 속도 [m/s]'),
         DeclareLaunchArgument('steer_gain', default_value='1.00',
                               description='조향 배수. 1.0 이 기하학적으로 필요한 값'),
-        DeclareLaunchArgument('kappa_straight_on', default_value='0.045',
-                              description='직진 락온 진입 곡률 문턱'),
-        DeclareLaunchArgument('kappa_straight_off', default_value='0.070',
-                              description='직진 락온 해제 곡률 문턱'),
-        DeclareLaunchArgument('k_yaw_damp', default_value='0.0',
-                              description='요레이트 되먹임 감쇠 [rad/(rad/s)]'),
-        DeclareLaunchArgument('k_ff_compress', default_value='0.0',
-                              description='앞먹임 곡률 압축 계수. 클수록 급코너 조향을 줄인다'),
         DeclareLaunchArgument('k_offtrack', default_value='1.0',
                               description='뒷축 off-tracking 보정 배수'),
         DeclareLaunchArgument('k_ff_deficit', default_value='1.0',
@@ -77,11 +69,9 @@ def generate_launch_description():
                               description='오차 되먹임 점진이득 문턱 [m]. 작을수록 민감'),
         DeclareLaunchArgument('kappa_lpf', default_value='0.30',
                               description='곡률 저역통과 계수. 클수록 빠르고 노이지'),
-        DeclareLaunchArgument('target_lpf', default_value='0.28',
-                              description='최종 조향 저역통과 계수. 작을수록 부드럽고 느리다'),
         DeclareLaunchArgument('steer_rate_limit', default_value='2.2',
                               description='tick 당 조향 변화 상한 [step]'),
-        DeclareLaunchArgument('lane_width', default_value='309.0',
+        DeclareLaunchArgument('lane_width', default_value='328.0',
                               description='차로 폭 [BEV 픽셀]'),
 
         ExecuteProcess(
@@ -152,14 +142,9 @@ def generate_launch_description():
                          'k_cut_comp': arg('k_cut_comp', float),
                          'k_ff_deficit': arg('k_ff_deficit', float),
                          'k_offtrack': arg('k_offtrack', float),
-                         'k_ff_compress': arg('k_ff_compress', float),
-                         'k_yaw_damp': arg('k_yaw_damp', float),
-                         'kappa_straight_on': arg('kappa_straight_on', float),
-                         'kappa_straight_off': arg('kappa_straight_off', float),
                          'e_soft': arg('e_soft', float),
                          'kappa_lpf': arg('kappa_lpf', float),
-                         'steer_rate_limit': arg('steer_rate_limit', float),
-                         'target_lpf': arg('target_lpf', float)}]
+                         'steer_rate_limit': arg('steer_rate_limit', float)}]
         ),
        
         Node(

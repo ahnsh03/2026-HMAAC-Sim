@@ -10,8 +10,7 @@ from rclpy.qos import QoSDurabilityPolicy
 from rclpy.qos import QoSReliabilityPolicy
 
 from std_msgs.msg import String, Bool
-from nav_msgs.msg import Odometry
-from std_msgs.msg import Float32, Float32MultiArray
+from std_msgs.msg import Float32MultiArray
 from interfaces_pkg.msg import PathPlanningResult, DetectionArray, MotionCommand
 
 #---------------Variable Setting---------------
@@ -19,9 +18,7 @@ SUB_DETECTION_TOPIC_NAME = "detections"
 SUB_PATH_TOPIC_NAME = "path_planning_result"
 SUB_TRAFFIC_LIGHT_TOPIC_NAME = "yolov8_traffic_light_info"
 SUB_LIDAR_OBSTACLE_TOPIC_NAME = "lidar_obstacle_info"
-SUB_ODOM_TOPIC_NAME = "/odom"            # 차량이 실제로 낸 요레이트
 PUB_TOPIC_NAME = "topic_control_signal"
-PUB_STEER_TOPIC_NAME = "steering_angle"   # 연속 조향각 [rad]
 
 #----------------------------------------------
 
@@ -49,36 +46,43 @@ RAD_PER_STEP = MAX_STEER_RAD / STEER_LIMIT
 # 부호 규약: 경로가 오른쪽이면 조향 양수 -> simulation_sender 가 STEERING=-1 을
 # 곱해 우조향이 된다.
 
-# 전방 주시거리 Ld = K_LD * v + LD_BASE [m, 뒷차축 기준].
+# 전방 주시거리 Ld [m, 뒷차축 기준]. 속도와 곡률에 따라 움직인다.
 # BEV 가 뒷차축 앞 4.74m 부터 보이므로 그보다 짧게는 잡을 수 없다.
-# 2.4m/s 에서 5.43m 이라 사실상 고정값에 가깝다.
 #
-# 곡률에 따라 줄여도 봤지만 역효과였다. 짧은 주시거리는 순수추종의 이득을
-# 키워(delta ~ lat/Ld^2) 오히려 코너 안쪽을 더 파고들었다
-# (안쪽 치우침 0.44 -> 0.59m, 점선 밟음 29.0 -> 31.3%).
+# 속도만 반영하면 사실상 고정값(2.4m/s 에서 5.43m)이 되는데, 순수추종은
+# 조준점이 코너에 들어가는 순간부터 꺾기 시작하므로 차는 코너보다 5.4m 앞서
+# 꺾어 버린다. 코너 진입 전에 안쪽으로 붙는 원인이 이것이다.
+# 그래서 전방이 휘어 있으면 주시거리를 줄여 늦게, 대신 제때 꺾게 한다.
+# 직선에서는 길게 잡아 부드럽게 간다.
 K_LD = 0.70
 LD_BASE = 3.75
 LD_MIN = 4.85            # BEV 맨 아랫줄(4.74m)까지 쓸 수 있도록 낮춘다
 LD_MAX = 6.40
+KAPPA_REF = 0.035        # 이 곡률(반경 29m)에서 주시거리 단축이 절반쯤 걸린다
 
-# 조향은 두 몫으로 만든다.
-#   되먹임 = 순수추종. 전방 주시점의 횡방향을 보고 그 점을 향하는 조향각.
-#   앞먹임 = atan(축간거리 * 곡률). 순수추종이 모자랄 때만 그 부족분을 채운다
-#            (K_FF_DEFICIT). 곡률이 작으면 아예 끈다 (KAPPA_STRAIGHT_*).
+# 조향은 두 몫으로 나눈다.
+#   앞먹임 = atan(축간거리 * 곡률).  곡선을 도는 데 필요한 몫. 곡률을 시간적으로
+#            평활하므로, 일정한 곡선에서는 조향도 일정하게 유지된다.
+#   되먹임 = 가까운 지점의 '진짜 횡오차'.  그 지점의 차로 중심에서 곡률 때문에
+#            생기는 몫(kappa*s^2/2)을 빼면 남는 것이 실제 이탈량이다.
+#
+# 행별 정확도를 실측해 보니 가까운 행일수록 정확했다 (차를 진짜 차로 중앙에
+# 놓고 측정: y470 -0.10m, y390 -0.16m, y260 -0.15m, y100 -0.33m, y20 -0.54m).
+# 그래서 되먹임은 가까운 행에서 읽는다.
+S_ERR = 5.00             # 횡오차를 읽는 전방거리 [m]. BEV 최근접(4.74m) 바로 위
+K_E = 1.10               # 횡오차 이득. Stanley 형태 atan(K_E * e / v)
+V_REF_MIN = 1.2          # 위 식에서 속도 하한 [m/s]
+E_LIMIT = 1.2            # 횡오차 제한 [m]. 인지가 튀어도 급조향하지 않도록
 
-# 곡률 추정.
-# 곡률은 전방점 횡방향의 2차 미분이라 인지 잡음이 크게 증폭된다.
-# 직선에서 참값이 0 인데 실제로는 평균 -0.068, 표준편차 0.080 이 나온다.
-# 기저를 넓히고 잔차로 신뢰도를 매기는 재설계를 시험했지만 오히려 나빠졌다.
-# 편향이 CENTER_OFFSET 과 짝을 이뤄 균형을 잡고 있었기 때문이다 (SOLUTION.md 참고).
-KAPPA_LPF = 0.30         # 프레임 간 저역통과 계수 (29Hz 에서 시정수 약 0.11초)
-KAPPA_NEAR_SPAN = 2.6    # 곡률을 재는 구간 길이 [m]. 경로 앞쪽 절반쯤
-KAPPA_MIN_SPAN = 1.8     # 경로가 이보다 짧으면 곡률을 갱신하지 않고 유지한다 [m].
-                         # 급코너에서 시야가 좁아져 경로가 짧아질 때 조향을
-                         # 놓아버리지 않게 한다.
+# 곡률 추정. 경로가 흔들리면 곡률은 더 크게 흔들리므로 세게 눌러준다.
+KAPPA_LPF = 0.30         # 프레임 간 저역통과 계수 (29Hz 에서 시정수 약 0.14초).
+                         # 너무 느리면 조향은 미리 꺾이는데 바깥보정이 늦게 들어와
+                         # 코너 진입에서 안쪽으로 파고든다.
+KAPPA_NEAR_SPAN = 2.6    # 앞먹임 곡률을 재는 구간 길이 [m]. 경로 앞쪽 절반쯤.
+KAPPA_MIN_SPAN = 1.8     # 경로가 이보다 짧으면 곡률을 갱신하지 않고 유지한다 [m]
 KAPPA_LIMIT = 0.13       # 곡률 상한 [1/m] (반경 7.7m).
-                         # GT 중앙선의 최대 곡률은 0.10, 실제 주행 궤적은 0.111
-                         # 까지 나오므로 그보다 여유를 둔다.
+                         # GT 경로에서 잰 이 트랙의 최대 곡률이 약 0.10 이다.
+                         # 예전 값 0.30 은 반경 3.3m 로, 노이즈를 그대로 통과시켰다.
 
 # 순수추종의 코너 파고듦 보정 계수. 1.0 이면 기하학적 보정량(kappa*Ld^2/8) 그대로.
 # 0 = 보정 없음(순수추종 그대로).
@@ -102,28 +106,6 @@ K_OFFTRACK = 1.0
 # 그래서 곡률로 계산한 정상선회 조향 atan(축간거리*곡률) 을 하한으로 깐다.
 # 순수추종이 이미 그만큼 내고 있으면 아무 일도 하지 않는다.
 K_FF_DEFICIT = 1.0
-
-# 직진 락온.
-#
-# 직선에서 GT 도로곡률로 계산한 이상 조향은 -0.02칸, 즉 사실상 0 이다.
-# 그런데 인지 곡률은 직선에서도 표준편차 0.080 이라 앞먹임 atan(축간거리*곡률)이
-# ±2.45칸의 잡음을 그대로 조향에 넣는다. 순수추종 항의 잡음(±0.67칸)보다 4배 크다.
-# 직진 우블링의 정체가 이것이다.
-#
-# 그래서 곡률이 충분히 작으면 앞먹임을 아예 끄고 순수추종 되먹임만 쓴다.
-# 켜고 끄는 문턱을 다르게 둬서(히스테리시스) 경계에서 깜빡이지 않게 한다.
-# 앞먹임을 꺼도 횡오차 되먹임은 그대로 살아 있으므로 차로는 계속 유지된다.
-KAPPA_STRAIGHT_ON = 0.045    # |곡률| 이 이 아래면 직진으로 보고 앞먹임을 끈다 (반경 22m)
-KAPPA_STRAIGHT_OFF = 0.070   # 이 위로 올라가면 직진 모드를 푼다 (반경 14m)
-
-# 앞먹임 곡률 압축 계수. kappa_ff = kappa / (1 + K_FF_COMPRESS * |kappa|).
-#
-# GT 도로곡률과 견줘 보니 완만한 곡선에서는 0.42칸 부족하고 급코너에서는
-# 0.74칸 과다였다. 그래서 큰 곡률만 누르는 압축을 시험했는데, 조향은 확실히
-# 부드러워졌지만(방향 반전 217 -> 29회) 코너 조향까지 같이 죽어 바깥으로
-# 밀렸다 (실선 밟음 0.8 에서 15.7%, 3.0 에서 25.2%).
-# 그래서 지금은 끄고, 직선에서만 앞먹임을 끄는 락온 방식을 쓴다.
-K_FF_COMPRESS = 0.0
 FF_DEFICIT_LPF = 1.0     # 부족분 평활 계수. 1.0 이면 평활하지 않는다.
                          # 여기서 따로 평활하면 아래 TARGET_LPF 와 겹쳐 지연만 쌓인다.
                          # 평활은 최종 조향 한 곳에서만 한다.
@@ -133,37 +115,24 @@ FF_DEFICIT_LPF = 1.0     # 부족분 평활 계수. 1.0 이면 평활하지 않�
 E_SOFT = 0.0
 
 # 조향 배수. 1.0 이 기하학적으로 필요한 값 그대로다.
-#
-# 실측 요레이트를 지령과 견줘 보니 이득이 0.73 이라 1.15 로 올려 봤는데,
-# 정정된 지표로는 조향만 거칠어지고(표본간 변화 0.463 -> 0.619, 방향 반전
-# 210 -> 253회) 차로 유지는 나아지지 않았다. 부족한 몫은 순수추종 되먹임이
-# 이미 메우고 있어서, 앞단에서 더 주면 되먹임과 겹쳐 과응답이 된다.
 STEER_GAIN = 1.00
-
-# 요레이트 되먹임 감쇠 [rad / (rad/s)].
-#
-# 조향, 요레이트, 전방점 횡방향이 모두 3.2초 주기로 함께 흔들린다. 전방 주시
-# 시간이 2.25초이므로 그 1.4배 주기의 폐루프 한계진동이다. 인지 잡음이 아니라
-# 루프 자체의 진동이라, 필터를 더 걸어도 지연만 늘고 잡히지 않는다.
-#
-# 차량이 실제로 낸 요레이트를 되먹여 감쇠를 건다. 인지와 달리 이 신호는 깨끗하다
-# (지령과의 상관 0.977). 지령보다 더 돌면 조향을 되돌리고, 덜 돌면 더 준다.
-K_YAW_DAMP = 0.0
 
 # 최종 조향의 1차 저역통과 계수. 조향 평활은 여기 한 곳에서만 한다.
 #
 # GT 곡률로 만든 이상 조향과 견줘 보니, 실제 조향은 1.0초 늦고 방향 반전이
 # 3.1배 많았다 (297회 -> 925회). 지연과 진동이 함께 있다는 뜻이라, 여러 곳에
 # 흩어져 있던 저역통과를 걷어내고 한 곳으로 모았다.
-# 0.28 이면 10Hz 에서 시정수 약 0.31초.
-# 연속 조향으로 바꾼 뒤 정수화 사각지대가 없어져 더 세게 걸 수 있게 됐다.
-# 0.45 -> 0.28 로 조향 표본간 변화 0.573 -> 0.446칸, 방향반전 331 -> 206회.
-# 0.18 까지 낮추면 더 부드럽지만 지연이 커져 바깥 실선을 밟는다 (4.8 -> 10.4%).
-TARGET_LPF = 0.28
+# 0.45 면 10Hz 에서 시정수 약 0.19초.
+TARGET_LPF = 0.45
 
-STEER_RATE_LIMIT = 2.2   # 한 tick(TIMER) 당 조향 변화량 상한 [step].
+STEER_RATE_LIMIT = 3.0   # 한 tick(TIMER) 당 조향 변화량 상한 [step].
                          # 평활은 TARGET_LPF 가 하므로, 여기서는 한 프레임짜리
                          # 오검출이 그대로 넘어가지 않게 막는 정도만 한다.
+SIGMA_DELTA = True       # 정수 조향의 성긴 단차를 시간평균으로 메운다
+QUANT_HYST = 0.30        # 정수 조향을 바꾸는 문턱 [step]. 0 이면 그냥 반올림인데,
+                         # 연속값이 두 칸 경계 근처면 매 tick 칸을 오가며 직선에서도
+                         # 조향이 꿈틀거린다. 크게 잡으면 사각지대가 되어 한쪽으로
+                         # 밀린 채 안 돌아오므로 0.3 정도만 준다.
 
 #---------------속도---------------
 # 속도 명령은 0~255 이고 v[m/s] = speed / 51 이다 (MAX_SPEED=5 기준).
@@ -231,16 +200,11 @@ class MotionPlanningNode(Node):
         self.ld_base = self.declare_parameter('ld_base', LD_BASE).value
         self.k_cut_comp = self.declare_parameter('k_cut_comp', K_CUT_COMP).value
         self.k_ff_deficit = self.declare_parameter('k_ff_deficit', K_FF_DEFICIT).value
-        self.k_ff_compress = self.declare_parameter('k_ff_compress', K_FF_COMPRESS).value
-        self.k_yaw_damp = self.declare_parameter('k_yaw_damp', K_YAW_DAMP).value
-        self.kappa_straight_on = self.declare_parameter('kappa_straight_on', KAPPA_STRAIGHT_ON).value
-        self.kappa_straight_off = self.declare_parameter('kappa_straight_off', KAPPA_STRAIGHT_OFF).value
         self.k_offtrack = self.declare_parameter('k_offtrack', K_OFFTRACK).value
         self.e_soft = self.declare_parameter('e_soft', E_SOFT).value
         self.steer_gain = self.declare_parameter('steer_gain', STEER_GAIN).value
         self.kappa_lpf = self.declare_parameter('kappa_lpf', KAPPA_LPF).value
         self.steer_rate_limit = self.declare_parameter('steer_rate_limit', STEER_RATE_LIMIT).value
-        self.target_lpf = self.declare_parameter('target_lpf', TARGET_LPF).value
         self.lane_timeout = self.declare_parameter('lane_timeout', LANE_TIMEOUT).value
 
         # QoS 설정
@@ -263,8 +227,6 @@ class MotionPlanningNode(Node):
         self.speed_mps = 0.0     # 연속값 속도 [m/s]
         self.kappa = 0.0         # 저역통과한 경로 곡률 [1/m]
         self.ff_deficit = 0.0    # 저역통과한 앞먹임 부족분 [rad]
-        self.straight_mode = True  # 직진 락온 상태
-        self.yaw_rate = None     # 실측 요레이트 [rad/s]
         self.quant_err = 0.0     # 정수화하며 버린 조향 (시그마-델타용)
         self.steer_lpf = 0.0     # 저역통과한 목표 조향 [step]
         self.debug = None        # (주시거리, 횡방향, 곡률, 목표조향)
@@ -279,15 +241,9 @@ class MotionPlanningNode(Node):
         self.path_sub = self.create_subscription(PathPlanningResult, self.sub_path_topic, self.path_callback, self.qos_profile)
         self.traffic_light_sub = self.create_subscription(String, self.sub_traffic_light_topic, self.traffic_light_callback, self.qos_profile)
         self.lidar_sub = self.create_subscription(Bool, self.sub_lidar_obstacle_topic, self.lidar_callback, self.qos_profile)
-        self.odom_sub = self.create_subscription(Odometry, SUB_ODOM_TOPIC_NAME, self.odom_callback, self.qos_profile)
 
         # 퍼블리셔 설정
         self.publisher = self.create_publisher(MotionCommand, self.pub_topic, self.qos_profile)
-        # 시뮬레이션에서는 조향을 연속값으로 줄 수 있다. 실차(오프라인 실습)는
-        # 아두이노가 -7..7 정수만 받으므로 MotionCommand 경로도 그대로 둔다.
-        # simulation_sender 가 이 토픽이 있으면 우선 쓰고, 없으면 정수 경로를 쓴다.
-        self.steer_pub = self.create_publisher(Float32, PUB_STEER_TOPIC_NAME, self.qos_profile)
-
         # 진단용: [주시거리 m, 그 지점 횡방향 m, 곡률 1/m, 목표조향 step, 실제조향 step]
         self.debug_pub = self.create_publisher(Float32MultiArray, 'control_debug', self.qos_profile)
 
@@ -318,9 +274,6 @@ class MotionPlanningNode(Node):
 
     def lidar_callback(self, msg: Bool):
         self.lidar_data = msg
-
-    def odom_callback(self, msg: Odometry):
-        self.yaw_rate = float(msg.twist.twist.angular.z)
 
     def path_point(self, ahead_m):
         """전방 ahead_m 근처의 경로점. (실제 전방거리 [m], 횡방향 [m]) 오른쪽이 양수.
@@ -376,20 +329,23 @@ class MotionPlanningNode(Node):
         return err * abs(err) / (abs(err) + self.e_soft)
 
     def follow_lane(self):
-        """순수추종 되먹임 + 곡률 앞먹임으로 조향을 만들고, 곡률로 속도를 정한다."""
+        """곡률 앞먹임 + 가까운 지점의 횡오차 되먹임.
+
+        코너에서 조향이 들쭉날쭉하지 않고 곡률에 맞는 값으로 유지되도록,
+        조향의 큰 몫은 시간적으로 평활한 곡률에서 만든다.
+        """
         kappa = self.update_curvature()
 
-        # 속도가 붙을수록 멀리 본다. 곡률로 주시거리를 줄여도 봤는데 역효과였다.
-        # 짧은 주시거리는 순수추종의 이득을 키워(delta ~ lat/Ld^2) 오히려 코너
-        # 안쪽을 더 파고들었다 (치우침 0.44 -> 0.59m, 점선 밟음 29.0 -> 31.3%).
+        # 속도가 붙을수록 멀리 보고, 전방이 휘어 있으면 가까이 본다.
+        # 곡선에서 멀리 보면 코너에 들어가기도 전에 꺾어 안쪽으로 붙는다.
+        # 곡률로 주시거리를 줄여도 봤는데 역효과였다. 짧은 주시거리는 순수추종의
+        # 이득을 키워(delta ~ lat/Ld^2) 오히려 더 파고들었다.
+        # 안쪽 치우침 0.44 -> 0.59m, 점선 밟음 29.0 -> 31.3%.
         lookahead = float(np.clip(self.k_ld * self.speed_mps + self.ld_base, LD_MIN, LD_MAX))
         dist, lat = self.path_point(lookahead)
 
-        # 곡선을 정확히 따라가고 있어도 전방 주시점의 차로 중심은 옆에 있다
-        # (그 양이 kappa*s^2/2). 그 몫과 진짜 오차를 나눠 두어, 되먹임 이득이나
-        # 코너 보정을 오차에만 걸 수 있게 한다.
-        # 기본값(E_SOFT=0, K_CUT_COMP=0)에서는 두 항이 상쇄되어
-        # lat_aim = lat - (뒷축 보정) 이 된다.
+        # 곡선을 정확히 따라가고 있어도 전방 주시점의 차로 중심은 옆에 있다.
+        # 그 몫과 진짜 오차를 나눠, 되먹임에만 점진 이득을 건다.
         lat_curve = kappa * dist * dist / 2.0
         lat_err = lat - lat_curve
         lat_aim = lat_curve + self.soft_gain(lat_err) + self.k_cut_comp * kappa * dist * dist / 8.0
@@ -399,36 +355,18 @@ class MotionPlanningNode(Node):
 
         delta = math.atan2(2.0 * WHEELBASE * lat_aim, dist * dist + lat_aim * lat_aim)
 
-        # 직진 락온: 곡률이 충분히 작으면 앞먹임을 끄고 순수추종만 쓴다.
-        # 직선에서 곡률은 사실상 잡음이고, 그 잡음이 앞먹임을 통해 조향에
-        # 그대로 들어오는 것이 직진 우블링의 정체였다.
-        ak = abs(kappa)
-        if self.straight_mode:
-            if ak > self.kappa_straight_off:
-                self.straight_mode = False
-        elif ak < self.kappa_straight_on:
-            self.straight_mode = True
-
-        if self.straight_mode:
-            kappa_ff = 0.0
-        else:
-            # 곡률이 클수록 앞먹임을 눌러 급코너 과조향을 줄인다 (기본은 끔)
-            kappa_ff = kappa / (1.0 + self.k_ff_compress * abs(kappa))
-        delta_ff = math.atan(WHEELBASE * kappa_ff)
-
         # 곡률이 큰 구간에서 순수추종이 모자란 만큼만 채운다. 부호는 곡률을 따른다.
+        #
+        # 부족분을 그대로 더하면, 곡률은 평활돼 있는데 순수추종 값은 노이지해서
+        # 둘의 대소가 뒤바뀔 때마다 보정이 켜졌다 꺼졌다 하며 조향이 튄다.
+        # 완만한 곡선에서 좌우로 흔들리는 원인이 이것이라, 부족분 자체를 평활한다.
+        delta_ff = math.atan(WHEELBASE * kappa)
         deficit = 0.0
         if delta_ff * delta >= 0.0:
             deficit = max(0.0, abs(delta_ff) - abs(delta))
         self.ff_deficit += FF_DEFICIT_LPF * (deficit - self.ff_deficit)
         if delta_ff != 0.0:
             delta += math.copysign(self.k_ff_deficit * self.ff_deficit, delta_ff)
-
-        # 요레이트 감쇠. 직전에 낸 조향이 만들었어야 할 요레이트와 실제를 견준다.
-        # 우조향(+)이면 시계방향이라 요레이트는 음수다.
-        if self.yaw_rate is not None and self.speed_mps > 0.3:
-            r_des = -self.speed_mps * math.tan(self.steer * RAD_PER_STEP) / WHEELBASE
-            delta += self.k_yaw_damp * (self.yaw_rate - r_des)
 
         target_steer = float(np.clip(self.steer_gain * delta / RAD_PER_STEP,
                                      -STEER_LIMIT, STEER_LIMIT))
@@ -437,7 +375,7 @@ class MotionPlanningNode(Node):
         self.lat_err = e
 
         # 평활은 여기 한 곳에서만 한다. 저역통과 뒤에 변화량 상한을 건다.
-        self.steer_lpf += self.target_lpf * (target_steer - self.steer_lpf)
+        self.steer_lpf += TARGET_LPF * (target_steer - self.steer_lpf)
         step = float(np.clip(self.steer_lpf - self.steer,
                              -self.steer_rate_limit, self.steer_rate_limit))
         self.steer += step
@@ -490,13 +428,6 @@ class MotionPlanningNode(Node):
         motion_command_msg.left_speed = int(self.left_speed_command)
         motion_command_msg.right_speed = int(self.right_speed_command)
         self.publisher.publish(motion_command_msg)
-
-        # 연속 조향각. 정수화로 잃는 5.29도 해상도를 그대로 살린다.
-        # 속도 명령이 0 이면 조향도 0 으로 보내 정지 상태를 흐리지 않는다.
-        angle = Float32()
-        angle.data = float(np.clip(self.steer, -STEER_LIMIT, STEER_LIMIT) * RAD_PER_STEP
-                           if self.left_speed_command != 0 else 0.0)
-        self.steer_pub.publish(angle)
 
         if self.debug is not None:
             dbg = Float32MultiArray()
@@ -561,20 +492,28 @@ class MotionPlanningNode(Node):
     def quantize_steer(self):
         """연속 조향을 정수 -7..7 로 만든다.
 
-        시뮬레이션은 `steering_angle` 토픽으로 연속 조향각을 따로 받으므로
-        이 정수값을 쓰지 않는다. 실차(오프라인 실습)의 아두이노가 정수만 받기에
-        MotionCommand 경로를 그대로 유지한다.
+        한 칸이 5.29도로 성기다. 반경으로 치면 2칸이 15.3m, 3칸이 10.1m 라
+        그 사이 값을 낼 수 없어 구간별 단차가 크다.
 
-        한 칸이 5.29도로 성기므로, 정수화하며 버린 몫을 다음 tick 으로 넘겨
-        (1차 잡음성형) 시간평균이 연속값과 같아지게 한다. 2.5칸이 필요하면
+        SIGMA_DELTA 를 켜면 정수화하며 버린 몫을 다음 tick 으로 넘겨서
+        (1차 잡음성형) 조향의 시간평균이 연속값과 같아진다. 2.5칸이 필요하면
         3,2,3,2 를 번갈아 내보내는 식이다. 한 tick 에 한 칸까지만 움직이도록
         묶어 눈에 띄는 튐은 막는다.
+
+        끄면 히스테리시스 방식이다. 지금 칸에서 QUANT_HYST 이상 벗어날 때만
+        칸을 바꾼다. 떨림은 없지만 그만큼 사각지대가 생긴다.
         """
-        acc = self.steer + self.quant_err
-        raw = int(np.clip(round(acc), -STEER_LIMIT, STEER_LIMIT))
-        raw = int(np.clip(raw, self.steering_command - 1, self.steering_command + 1))
-        self.quant_err = float(np.clip(acc - raw, -1.0, 1.0))
-        return raw
+        if SIGMA_DELTA:
+            acc = self.steer + self.quant_err
+            raw = int(np.clip(round(acc), -STEER_LIMIT, STEER_LIMIT))
+            raw = int(np.clip(raw, self.steering_command - 1, self.steering_command + 1))
+            self.quant_err = float(np.clip(acc - raw, -1.0, 1.0))
+            return raw
+
+        if abs(self.steer - self.steering_command) <= QUANT_HYST:
+            return int(self.steering_command)
+        return int(np.clip(round(self.steer), -STEER_LIMIT, STEER_LIMIT))
+
 
 def main(args=None):
     rclpy.init(args=args)
