@@ -47,6 +47,14 @@ mkdir -p "${XDG_RUNTIME_DIR}"
 # /camera/image_raw 가 영영 나오지 않는다.
 export GAZEBO_MODEL_DATABASE_URI=""
 
+# 컨테이너를 다시 만들면 ~/.gazebo/models 가 비어 카메라가 흰 화면만 낸다.
+# 워크스페이스 모델을 한 번 복사해 둔다 (이미 있으면 건너뛴다).
+if [ ! -d "${HOME}/.gazebo/models/race_track" ]; then
+    mkdir -p "${HOME}/.gazebo/models"
+    cp -a "${WS}/src/simulation_pkg/models/." "${HOME}/.gazebo/models/"
+    rm -rf "${HOME}/.gazebo/models/etc"
+fi
+
 cd "${WS}" || exit 1
 
 if [ "${DETACH}" -eq 1 ]; then
