@@ -1,0 +1,54 @@
+# 이 레포 전용. 레포 루트(..)를 /root/hmobility_ws 로 마운트한다.
+#   cd docker && xhost +local:docker && docker compose up -d hmobility-sim
+
+services:
+  # Gazebo 시뮬 (CPU torch)
+  hmobility-sim:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: hmobility-sim:humble
+    container_name: hmobility-sim
+    network_mode: host
+    environment:
+      - DISPLAY=${DISPLAY}
+      - QT_X11_NO_MITSHM=1
+      - ROS_DOMAIN_ID=${SIM_ROS_DOMAIN_ID:-0}
+      - LIBGL_ALWAYS_SOFTWARE=${LIBGL_ALWAYS_SOFTWARE:-0}
+    volumes:
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+      - /etc/localtime:/etc/localtime:ro
+      - ..:/root/hmobility_ws:rw
+    shm_size: "2gb"
+    stdin_open: true
+    tty: true
+    command: ["tail", "-f", "/dev/null"]
+
+  # 같은 시뮬 + CUDA torch. YOLO 추론이 병목일 때만 쓴다.
+  # hmobility-sim 과 같은 워크스페이스를 마운트하므로 동시에 쓰지 말 것 (install/ 충돌).
+  hmobility-sim-gpu:
+    build:
+      context: .
+      dockerfile: Dockerfile.cuda
+    image: hmobility-sim:humble-cuda
+    container_name: hmobility-sim-gpu
+    network_mode: host
+    gpus: all
+    environment:
+      - DISPLAY=${DISPLAY}
+      - QT_X11_NO_MITSHM=1
+      - ROS_DOMAIN_ID=${SIM_ROS_DOMAIN_ID:-0}
+      - NVIDIA_VISIBLE_DEVICES=all
+      # graphics 를 넣으면 NVIDIA 드라이버의 libGL 이 주입돼 WSLg 렌더링을 덮어쓰고,
+      # gzserver 가 스폰된 ego_vehicle 의 카메라 센서를 초기화하지 못한다.
+      # GPU 는 추론(compute)에만 쓰고 Gazebo 렌더링은 WSLg 에 맡긴다.
+      - NVIDIA_DRIVER_CAPABILITIES=utility,compute
+      - LIBGL_ALWAYS_SOFTWARE=${LIBGL_ALWAYS_SOFTWARE:-0}
+    volumes:
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+      - /etc/localtime:/etc/localtime:ro
+      - ..:/root/hmobility_ws:rw
+    shm_size: "2gb"
+    stdin_open: true
+    tty: true
+    command: ["tail", "-f", "/dev/null"]
