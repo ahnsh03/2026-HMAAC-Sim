@@ -36,6 +36,15 @@ SRC_MAT = [[238, 316], [402, 313], [501, 476], [155, 476]]
 # 아래쪽(가까운) 행을 반드시 포함해야 한다. 트랙 좌측의 급코너에서는 길이 카메라
 # 화각을 벗어나 먼 행에는 아무것도 안 잡히고, 차선 정보가 화면 맨 아래에만 남는다.
 # 예전에는 420 까지만 봐서 그 구간에서 인지가 통째로 비었다.
+#
+# 맨 아랫줄 470 은 정확하지 않다. 보닛에 가려 차로 마스크가 그 전에 끝나기 때문에
+# 여기서는 마스크의 잘린 아래 모서리를 문다. 차를 GT 차로 중앙에 세우고 재보면
+# (tools/lane_row_gt.py) 다른 행이 오차 -0.09m 일 때 470 만 -1.51m ± 1.21m 이고,
+# 곧은 길에서 경로가 휘는 것의 거의 전부가 이 한 행에서 나온다.
+#
+# 그런데도 남겨 둔다. 빼면 급코너에서 쓸 수 있는 행이 5개로 줄어 경로가 끊기고,
+# 무엇보다 이 행이 만드는 가짜 곡률이 지금 제어의 코너 조향을 공급하고 있다.
+# 자세한 실측은 motion_planner_node.update_bow 주석에 적었다.
 TARGET_POINT_YS = (20, 100, 180, 260, 330, 390, 435, 470)
 
 # 차로 중심을 오른쪽으로 이 만큼 민다 [BEV 픽셀, 약 103px = 1m]. 양수 = 오른쪽.
@@ -43,6 +52,9 @@ TARGET_POINT_YS = (20, 100, 180, 260, 330, 390, 435, 470)
 # 구조적 원인(앞먹임 시점, 곡률 추정 구간)을 모두 손본 뒤에도 남는 잔차만
 # 여기서 상쇄한다. 트랙 텍스처 기준으로 25 / 50px 을 재보니 50px 에서 점선 밟음이
 # 32.1% -> 22.4%, 실선 밟음 0%, 이탈량 0.54 -> 0.40m 로 가장 좋았다.
+#
+# 행 이상치를 메운 뒤 25px 로 줄여 3랩x2 를 돌려 봤으나 (밟음 17~21%, |이탈|
+# 0.37~0.40m, 2회차는 정지) 기준선(~10%, ~0.27m)보다 나빠져 다시 50px 로 둔다.
 CENTER_OFFSET = 50.0
 
 # 직전 프레임 대비 허용하는 중심 이동량 [px].
@@ -131,6 +143,9 @@ class Yolov8InfoExtractor(Node):
 
         self.publish_debug_image(detection_msg, centers)
 
+        # reject_inframe_outliers 는 호출하지 않는다. 곧은 길의 가짜 곡률은
+        # 잡지만, 그 곡률이 코너 조향을 먹여 주고 있어서 켜면 주행이 나빠진다
+        # (버리기 23.6%, 메우기 18.3%, 메우기+오프셋25 17~21% vs 기준선 ~10%).
         centers = self.reject_frame_jumps(centers)
         centers = self.smooth(centers)
         centers = self.hold_missing(centers)
@@ -193,6 +208,9 @@ class Yolov8InfoExtractor(Node):
 
         차로 중심은 거리에 대해 매끄럽다. 행들에 2차식을 맞춰보고 크게 벗어난
         행은 옆 차로나 갈라지는 도로를 물었다고 본다.
+
+        호출은 꺼 둔다. 켜면 직진 가짜 곡률은 줄지만 코너 조향이 부족해져
+        차선 밟음이 기준선(~10%)보다 나빠진다. 메우는 변형도 18%대였다.
         """
         if len(centers) < 4:
             return centers
@@ -201,7 +219,6 @@ class Yolov8InfoExtractor(Node):
         deg = 2 if len(ys) >= 5 else 1
         coeff = np.polyfit(ys, xs, deg)
         residual = np.abs(np.polyval(coeff, ys) - xs)
-        # 잔차가 큰 것부터 하나씩 떨궈본다
         keep = residual <= INFRAME_MAX_RESIDUAL
         if keep.sum() < INFRAME_MIN_KEEP:
             return centers
